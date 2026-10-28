@@ -94,3 +94,17 @@ def test_study_conditions_exist():
     assert STUDY_CONDITIONS[0] == "baseline"
     assert len(STUDY_CONDITIONS) == 6
     assert all(c in CONDITIONS for c in STUDY_CONDITIONS)
+
+
+def test_synonym_source_has_no_duplicate_keys():
+    """A repeated key in the SYNONYMS literal silently keeps only the last value."""
+    import ast
+    import collections
+    from pathlib import Path
+
+    import perturb.synonyms as mod
+
+    tree = ast.parse(Path(mod.__file__).read_text())
+    literal = next(n.value for n in tree.body if isinstance(n, ast.AnnAssign) and n.target.id == "SYNONYMS")
+    counts = collections.Counter(k.value for k in literal.keys)
+    assert not [k for k, c in counts.items() if c > 1]

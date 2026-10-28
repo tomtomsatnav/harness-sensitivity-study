@@ -36,7 +36,6 @@ SYNONYMS: dict[str, str] = {
     "record_id": "rec_ref",
     "query": "search_text",
     "matches": "hits",
-    "created_at": "opened_on",
     "updated_at": "edited_on",
     "last_active_at": "last_seen_on",
     "date_of_birth": "birth_date",
