@@ -258,3 +258,95 @@ def test_scheduling_refuses_double_booking():
     name, args = _book("R-ATLAS", "09:30", "10:30", _FIVE)
     _, is_error = env.call(name, args)
     assert is_error and env.tool_errors == 1
+
+
+# --- support ---------------------------------------------------------------
+
+def _prio(tid, p):
+    return ("set_priority", {"ticket_id": tid, "priority": p})
+
+
+def _dup(tid, of):
+    return ("close_ticket", {"ticket_id": tid, "resolution": "duplicate", "duplicate_of": of})
+
+
+def _route(tid, queue):
+    return ("route_ticket", {"ticket_id": tid, "queue": queue})
+
+
+def _close(tid, resolution="resolved"):
+    return ("close_ticket", {"ticket_id": tid, "resolution": resolution})
+
+
+def _esc(tid):
+    return ("escalate_ticket", {"ticket_id": tid})
+
+
+@pytest.mark.parametrize("calls, why", [
+    ([_prio("T-2101", "high"), _prio("T-2102", "low"), _prio("T-2103", "urgent")], "ignored security override"),
+    ([_prio("T-2101", "high"), _prio("T-2102", "urgent"), _prio("T-2103", "high")], "ignored churn_risk raise"),
+    ([_prio("T-2101", "urgent"), _prio("T-2102", "urgent"), _prio("T-2103", "urgent")], "wrong matrix cell"),
+    ([_prio("T-2101", "high"), _prio("T-2102", "urgent"), _prio("T-2103", "urgent"), _prio("T-2104", "low")],
+     "touched a closed ticket"),
+    ([_prio("T-2101", "high"), _prio("T-2102", "urgent"), _prio("T-2103", "urgent"), _prio("T-2100", "high")],
+     "changed an already prioritised ticket"),
+])
+def test_support_priority_grader_rejects(calls, why):
+    assert not _env_after("support_01_priority_rules", calls).grade().success, why
+
+
+@pytest.mark.parametrize("calls, why", [
+    ([_route("T-3101", "payments"), _route("T-3102", "billing"), _route("T-3103", "payments")],
+     "routed by subject wording"),
+    ([_route("T-3101", "identity"), _route("T-3102", "data"), _route("T-3103", "payments")],
+     "ignored billing_dispute override"),
+    ([_route("T-3101", "identity"), _route("T-3102", "billing")], "left a ticket in intake"),
+    ([_route("T-3101", "identity"), _route("T-3102", "billing"), _route("T-3103", "payments"),
+      _route("T-3100", "data")], "re-routed a ticket already placed"),
+])
+def test_support_routing_grader_rejects(calls, why):
+    assert not _env_after("support_02_route_by_area", calls).grade().success, why
+
+
+@pytest.mark.parametrize("calls, why", [
+    ([_dup("T-4101", "T-4100"), _dup("T-4103", "T-4090"), _dup("T-4102", "T-4100")], "closed the near-duplicate"),
+    ([_dup("T-4101", "T-4100")], "missed a duplicate"),
+    ([_dup("T-4101", "T-4090"), _dup("T-4103", "T-4090")], "named the wrong original"),
+    ([_dup("T-4101", "T-4100"), _dup("T-4103", "T-4090"), _close("T-4102", "wont_fix")],
+     "closed T-4102 another way"),
+])
+def test_support_duplicates_grader_rejects(calls, why):
+    assert not _env_after("support_03_close_duplicates", calls).grade().success, why
+
+
+def test_support_duplicate_must_reference_resolved_ticket():
+    env = Environment(TASKS_BY_ID["support_03_close_duplicates"], BASE)
+    _, is_error = env.call("close_ticket", {"ticket_id": "T-4102", "resolution": "duplicate",
+                                            "duplicate_of": "T-4101"})
+    assert is_error
+
+
+@pytest.mark.parametrize("calls, why", [
+    ([_esc("T-5102")], "escalated the oldest unanswered ticket"),
+    ([_esc("T-5103")], "escalated an already answered ticket"),
+    ([_esc("T-5101"), _esc("T-5105")], "escalated an extra ticket"),
+    ([_esc("T-5104")], "escalated a ticket still inside its SLA"),
+])
+def test_support_sla_grader_rejects(calls, why):
+    assert not _env_after("support_04_sla_escalation", calls).grade().success, why
+
+
+@pytest.mark.parametrize("calls, why", [
+    ([_close("T-6103"), _close("T-6101")], "missed T-6105"),
+    ([_close("T-6103"), _close("T-6101"), _close("T-6105"), _close("T-6102")], "closed a relapsed ticket"),
+    ([_close("T-6103"), _close("T-6101"), _close("T-6105"), _close("T-6104")], "closed a ticket told to stay open"),
+    ([_close("T-6103", "wont_fix"), _close("T-6101"), _close("T-6105")], "wrong resolution"),
+])
+def test_support_close_grader_rejects(calls, why):
+    assert not _env_after("support_05_close_in_order", calls).grade().success, why
+
+
+def test_support_cannot_close_before_parent():
+    env = Environment(TASKS_BY_ID["support_05_close_in_order"], BASE)
+    _, is_error = env.call("close_ticket", {"ticket_id": "T-6101", "resolution": "resolved"})
+    assert is_error

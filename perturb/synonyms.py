@@ -83,12 +83,28 @@ SYNONYMS: dict[str, str] = {
     "blackout_end": "quiet_until",
     "external_floor": "guest_storey",
 
-
-
     # support
-
-
-
+    "tickets": "case_list",
+    "ticket_id": "case_ref",
+    "body": "narrative",
+    "priority": "urgency",
+    "queue": "desk",
+    "product_area": "component_area",
+    "category": "case_type",
+    "impact": "blast_radius",
+    "error_code": "fault_code",
+    "created_at": "opened_at",
+    "first_response_at": "first_reply_at",
+    "blocked_by": "waiting_on_case",
+    "duplicate_of": "same_as_case",
+    "resolution": "closure_note",
+    "customer": "requester",
+    "plan": "service_plan",
+    "churn_risk": "attrition_flag",
+    "matrix": "urgency_grid",
+    "routes": "desk_routes",
+    "targets": "reply_targets",
+    "response_hours": "reply_within_hrs",
 }
 
 # Keys deliberately left unchanged in every condition.
