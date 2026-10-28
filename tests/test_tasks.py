@@ -163,6 +163,7 @@ def test_records_05_grader_rejects(calls, why):
 def test_records_cannot_archive_active_subscription():
     env = Environment(TASKS_BY_ID["records_05_active_subscription"], BASE)
     _, is_error = env.call("archive_record", {"record_id": "MAR-188", "merged_into": "MAR-100"})
+    assert is_error and env.tool_errors == 1
 
 
 # ---- scheduling
