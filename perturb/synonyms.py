@@ -61,6 +61,27 @@ SYNONYMS: dict[str, str] = {
     "to_warehouse_id": "dest_site",
 
     # scheduling
+    "rooms": "spaces",
+    "room_id": "space_ref",
+    "capacity": "seats",
+    "floor": "storey",
+    "equipment": "fittings",
+    "date": "day",
+    "bookings": "reservations",
+    "booking_id": "reservation_ref",
+    "subject": "topic",
+    "start": "begins_at",
+    "end": "finishes_at",
+    "attendee_ids": "participant_refs",
+    "person_id": "person_ref",
+    "utc_offset_hours": "tz_offset",
+    "work_start": "day_opens",
+    "work_end": "day_closes",
+    "busy": "occupied",
+    "room_buffer_minutes": "turnaround_minutes",
+    "blackout_start": "quiet_from",
+    "blackout_end": "quiet_until",
+    "external_floor": "guest_storey",
 
 
 
