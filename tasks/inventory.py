@@ -34,9 +34,13 @@ TARGET_AVAILABLE = 40
 
 
 class InventoryBackend:
+    # Subclasses swap in their own stock data.
+    WAREHOUSES = _WAREHOUSES
+    STOCK = _STOCK
+
     def __init__(self) -> None:
-        self.warehouses = copy.deepcopy(_WAREHOUSES)
-        self.stock = copy.deepcopy(_STOCK)
+        self.warehouses = copy.deepcopy(self.WAREHOUSES)
+        self.stock = copy.deepcopy(self.STOCK)
         self.initial_total = {sku: self._total(sku) for sku, _ in self.stock}
         self.transfers: list[dict[str, Any]] = []
 
@@ -58,6 +62,18 @@ class InventoryBackend:
     def get_stock(self, sku: str, warehouse_id: str) -> dict[str, Any]:
         levels = self._levels(sku, warehouse_id)
         return {"sku": sku, "warehouse_id": warehouse_id, **levels}
+
+    def get_sku_stock(self, sku: str) -> dict[str, Any]:
+        rows = [(w, v) for (s, w), v in sorted(self.stock.items()) if s == sku]
+        if not rows:
+            raise ToolError(f"Unknown SKU {sku!r}.")
+        return {"sku": sku, "warehouses": [{"warehouse_id": w, **v} for w, v in rows]}
+
+    def get_warehouse_stock(self, warehouse_id: str) -> dict[str, Any]:
+        if not any(w["warehouse_id"] == warehouse_id for w in self.warehouses):
+            raise ToolError(f"No warehouse with ID {warehouse_id!r}.")
+        items = [{"sku": s, **v} for (s, w), v in sorted(self.stock.items()) if w == warehouse_id]
+        return {"warehouse_id": warehouse_id, "items": items}
 
     def transfer_stock(self, sku: str, from_warehouse_id: str, to_warehouse_id: str, quantity: int) -> dict[str, Any]:
         if from_warehouse_id == to_warehouse_id:
@@ -179,3 +195,241 @@ TASKS = [
         reference_solution=reference_solution,
     ),
 ]
+
+
+# --- inventory_02..05 ---------------------------------------------------------------------------
+
+def _lv(on_hand: int, reserved: int, safety_stock: int) -> dict[str, int]:
+    return {"on_hand": on_hand, "reserved": reserved, "safety_stock": safety_stock}
+
+
+def _grade_on_hand(backend: InventoryBackend, moves: dict[tuple[str, str], int]) -> Grade:
+    """Whole-state check: on-hand units everywhere must equal the start plus `moves`, nothing else touched."""
+    base = backend.STOCK
+    expected = {k: v["on_hand"] + moves.get(k, 0) for k, v in base.items()}
+    actual = {k: v["on_hand"] for k, v in backend.stock.items() if k in base or v["on_hand"]}
+    for k in sorted(set(expected) | set(actual)):
+        if actual.get(k, 0) != expected.get(k, 0):
+            return Grade(success=False,
+                         detail=f"{k[0]}@{k[1]} has {actual.get(k, 0)} on hand, expected {expected.get(k, 0)}")
+    for k, v in backend.stock.items():
+        if k in base and (v["reserved"], v["safety_stock"]) != (base[k]["reserved"], base[k]["safety_stock"]):
+            return Grade(success=False, detail=f"reserved or safety levels changed for {k[0]}@{k[1]}")
+    return Grade(success=True, detail="correct end state")
+
+
+def _avail(lv: dict[str, int]) -> int:
+    return lv["on_hand"] - lv["reserved"]
+
+
+def _surplus(lv: dict[str, int]) -> int:
+    return lv["on_hand"] - lv["reserved"] - lv["safety_stock"]
+
+
+# inventory_02: no single source can cover the shortfall; sources are used by largest surplus first.
+# CHI has the most on hand but most of it is reserved, so it is the last choice by surplus.
+class SplitBackend(InventoryBackend):
+    STOCK = {
+        ("WID-204", "BOS"): _lv(12, 2, 5),
+        ("WID-204", "CHI"): _lv(100, 75, 10),
+        ("WID-204", "DAL"): _lv(70, 10, 20),
+        ("WID-204", "PHX"): _lv(50, 5, 10),
+        ("WID-204", "SEA"): _lv(30, 0, 28),
+    }
+
+
+def grade_split(backend: InventoryBackend) -> Grade:
+    # BOS needs 45 more: DAL's whole surplus (40), then 5 from PHX.
+    return _grade_on_hand(backend, {("WID-204", "DAL"): -40, ("WID-204", "PHX"): -5, ("WID-204", "BOS"): 45})
+
+
+def reference_split(call: CallFn) -> None:
+    rows = call("get_sku_stock", sku="WID-204")["warehouses"]
+    bos = next(r for r in rows if r["warehouse_id"] == "BOS")
+    need = 55 - _avail(bos)
+    donors = sorted((r for r in rows if r["warehouse_id"] != "BOS"), key=_surplus, reverse=True)
+    for r in donors:
+        if need <= 0:
+            break
+        qty = min(_surplus(r), need)
+        if qty > 0:
+            call("transfer_stock", sku="WID-204", from_warehouse_id=r["warehouse_id"],
+                 to_warehouse_id="BOS", quantity=qty)
+            need -= qty
+
+
+# inventory_03: three SKUs; each has exactly one source that stays above safety stock, and one needs nothing.
+class MultiSkuBackend(InventoryBackend):
+    STOCK = {
+        ("WID-204", "BOS"): _lv(20, 8, 5),
+        ("WID-204", "CHI"): _lv(50, 10, 30),
+        ("WID-204", "DAL"): _lv(40, 0, 15),
+        ("WID-204", "PHX"): _lv(90, 70, 5),
+        ("WID-310", "BOS"): _lv(9, 5, 3),
+        ("WID-310", "CHI"): _lv(80, 20, 25),
+        ("WID-310", "DAL"): _lv(30, 0, 10),
+        ("WID-310", "PHX"): _lv(120, 100, 0),
+        ("GAD-550", "BOS"): _lv(34, 4, 6),
+        ("GAD-550", "CHI"): _lv(60, 5, 10),
+        ("GAD-550", "DAL"): _lv(45, 0, 10),
+    }
+
+
+def grade_multi(backend: InventoryBackend) -> Grade:
+    return _grade_on_hand(backend, {
+        ("WID-204", "DAL"): -18, ("WID-204", "BOS"): 18,
+        ("WID-310", "CHI"): -26, ("WID-310", "BOS"): 26,
+    })
+
+
+def reference_multi(call: CallFn) -> None:
+    for sku in ("WID-204", "WID-310", "GAD-550"):
+        rows = call("get_sku_stock", sku=sku)["warehouses"]
+        bos = next(r for r in rows if r["warehouse_id"] == "BOS")
+        need = 30 - _avail(bos)
+        if need <= 0:
+            continue
+        source = next(r for r in rows if r["warehouse_id"] != "BOS" and _surplus(r) >= need)
+        call("transfer_stock", sku=sku, from_warehouse_id=source["warehouse_id"], to_warehouse_id="BOS", quantity=need)
+
+
+# inventory_04: two warehouses to top up from one common donor; only DAL can cover both shortfalls.
+class RebalanceBackend(InventoryBackend):
+    STOCK = {
+        ("WID-410", "BOS"): _lv(30, 5, 5),
+        ("WID-410", "CHI"): _lv(100, 40, 25),
+        ("WID-410", "DAL"): _lv(95, 25, 20),
+        ("WID-410", "PHX"): _lv(220, 170, 30),
+        ("WID-410", "SEA"): _lv(14, 4, 5),
+    }
+
+
+def grade_rebalance(backend: InventoryBackend) -> Grade:
+    return _grade_on_hand(backend, {("WID-410", "DAL"): -45, ("WID-410", "BOS"): 15, ("WID-410", "SEA"): 30})
+
+
+def reference_rebalance(call: CallFn) -> None:
+    rows = call("get_sku_stock", sku="WID-410")["warehouses"]
+    targets = {r["warehouse_id"]: 40 - _avail(r) for r in rows if r["warehouse_id"] in ("BOS", "SEA")}
+    total = sum(targets.values())
+    donor = next(r for r in rows if r["warehouse_id"] not in targets and _surplus(r) >= total)
+    for wh, qty in targets.items():
+        if qty > 0:
+            call("transfer_stock", sku="WID-410", from_warehouse_id=donor["warehouse_id"],
+                 to_warehouse_id=wh, quantity=qty)
+
+
+# inventory_05: closing PHX; only unreserved units move, and one SKU is fully reserved.
+class ClosureBackend(InventoryBackend):
+    STOCK = {
+        ("WID-204", "BOS"): _lv(20, 8, 5),
+        ("WID-204", "DAL"): _lv(40, 10, 15),
+        ("WID-204", "PHX"): _lv(60, 35, 10),
+        ("WID-310", "CHI"): _lv(30, 5, 10),
+        ("WID-310", "DAL"): _lv(50, 10, 15),
+        ("WID-310", "PHX"): _lv(25, 25, 5),
+        ("GAD-550", "BOS"): _lv(34, 4, 6),
+        ("GAD-550", "DAL"): _lv(22, 2, 8),
+        ("GAD-550", "PHX"): _lv(48, 12, 8),
+    }
+
+
+def grade_closure(backend: InventoryBackend) -> Grade:
+    return _grade_on_hand(backend, {
+        ("WID-204", "PHX"): -25, ("WID-204", "DAL"): 25,
+        ("GAD-550", "PHX"): -36, ("GAD-550", "DAL"): 36,
+    })
+
+
+def reference_closure(call: CallFn) -> None:
+    for item in call("get_warehouse_stock", warehouse_id="PHX")["items"]:
+        movable = _avail(item)
+        if movable > 0:
+            call("transfer_stock", sku=item["sku"], from_warehouse_id="PHX", to_warehouse_id="DAL", quantity=movable)
+
+
+_SKU_STOCK_TOOL = ToolSpec(
+    name="get_sku_stock",
+    description="Get stock levels for one SKU at every warehouse that holds it: on hand, reserved, and safety stock.",
+    paraphrase="Return one SKU's stock at each warehouse that carries it: on-hand units, reserved units, and safety stock.",
+    input_schema={
+        "type": "object",
+        "properties": {"sku": {"type": "string", "description": "The product SKU."}},
+        "required": ["sku"],
+        "additionalProperties": False,
+    },
+)
+
+_WAREHOUSE_STOCK_TOOL = ToolSpec(
+    name="get_warehouse_stock",
+    description="Get stock levels for every SKU held at one warehouse: on hand, reserved, and safety stock.",
+    paraphrase="Return stock for each SKU one warehouse holds: on-hand, reserved, and safety stock levels.",
+    input_schema={
+        "type": "object",
+        "properties": {"warehouse_id": {"type": "string", "description": "The warehouse ID."}},
+        "required": ["warehouse_id"],
+        "additionalProperties": False,
+    },
+)
+
+_LIST_TOOL, _GET_TOOL, _TRANSFER_TOOL = TOOLS
+
+_RULES = (
+    "A warehouse's available units are its on-hand units minus its reserved units. A transfer must never "
+    "leave a source warehouse with fewer available units than its safety stock, and reserved units cannot move."
+)
+
+TASKS.extend([
+    Task(
+        task_id="inventory_02_split_sources",
+        domain="inventory",
+        instruction=(
+            "Warehouse BOS needs exactly 55 available units of SKU WID-204. No single other warehouse can supply "
+            "the shortfall, so split it across sources. " + _RULES + " Draw on the other warehouses in order of "
+            "their surplus (available units minus safety stock), largest first, taking each one's entire surplus "
+            "before moving on to the next; the last source gives only what is still missing."
+        ),
+        tools=(_LIST_TOOL, _SKU_STOCK_TOOL, _GET_TOOL, _TRANSFER_TOOL),
+        make_backend=SplitBackend,
+        grade=grade_split,
+        reference_solution=reference_split,
+    ),
+    Task(
+        task_id="inventory_03_three_skus",
+        domain="inventory",
+        instruction=(
+            "Warehouse BOS needs exactly 30 available units of each of SKUs WID-204, WID-310 and GAD-550 for a "
+            "consolidated outbound order. For each SKU that is short, make a single transfer from one other "
+            "warehouse; leave any SKU that already has enough untouched. " + _RULES
+        ),
+        tools=(_LIST_TOOL, _SKU_STOCK_TOOL, _GET_TOOL, _TRANSFER_TOOL),
+        make_backend=MultiSkuBackend,
+        grade=grade_multi,
+        reference_solution=reference_multi,
+    ),
+    Task(
+        task_id="inventory_04_rebalance_two_sites",
+        domain="inventory",
+        instruction=(
+            "Warehouses BOS and SEA must each hold exactly 40 available units of SKU WID-410. Bring both up "
+            "to 40 using a single donor warehouse for both transfers (not BOS or SEA). " + _RULES
+        ),
+        tools=(_LIST_TOOL, _SKU_STOCK_TOOL, _GET_TOOL, _TRANSFER_TOOL),
+        make_backend=RebalanceBackend,
+        grade=grade_rebalance,
+        reference_solution=reference_rebalance,
+    ),
+    Task(
+        task_id="inventory_05_warehouse_closure",
+        domain="inventory",
+        instruction=(
+            "Warehouse PHX is closing. Move every unreserved unit of every SKU it holds to warehouse DAL. "
+            "Reserved units must stay at PHX to be fulfilled there, and PHX's safety stock levels no longer "
+            "apply. Do not touch any other warehouse."
+        ),
+        tools=(_LIST_TOOL, _WAREHOUSE_STOCK_TOOL, _GET_TOOL, _TRANSFER_TOOL),
+        make_backend=ClosureBackend,
+        grade=grade_closure,
+        reference_solution=reference_closure,
+    ),
+])

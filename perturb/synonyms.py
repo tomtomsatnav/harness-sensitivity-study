@@ -29,6 +29,9 @@ SYNONYMS: dict[str, str] = {
     "refund_id": "refund_ref",
     "amount": "amt",
     "reason": "cause",
+    "credit_id": "credit_ref",
+    "refund_window_days": "claim_window_days",
+    "store_credit_percent": "credit_share_percent",
     # records
     "record_id": "rec_ref",
     "query": "search_text",
