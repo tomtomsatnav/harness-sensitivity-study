@@ -489,3 +489,189 @@ def test_scheduling_rejects_off_grid_start():
     name, args = _book("R-CEDAR", "10:15", "11:45", _FOUR)
     _, is_error = env.call(name, args)
     assert is_error and env.tool_errors == 1
+
+
+# --- harder observations: size budget and uniqueness of the correct answer -------------------------
+# Covers the orders, inventory and support domains. Tokens are estimated as len(json text) / 3.6.
+
+_DENSE_DOMAINS = ("orders", "inventory", "support")
+_DENSE_TASKS = [t for t in ALL_TASKS if t.domain in _DENSE_DOMAINS]
+
+
+@pytest.mark.parametrize("task", _DENSE_TASKS, ids=[t.task_id for t in _DENSE_TASKS])
+def test_observation_size_budget(task):
+    _, log = run_reference(task, BASE)
+    sizes = [len(BASE.encode(obs)) / 3.6 for _, _, obs in log]
+    assert 2500 <= sum(sizes) <= 5000, f"{task.task_id}: {sum(sizes):.0f} tokens of observations"
+    assert max(sizes) <= 2500, f"{task.task_id}: largest observation is {max(sizes):.0f} tokens"
+
+
+def _orders_data(task_id):
+    b = TASKS_BY_ID[task_id].make_backend()
+    assert len({o["order_id"] for o in b.orders}) == len(b.orders), "order IDs collide"
+    return b
+
+
+def _mentions(order, word):
+    return any(word in i["description"].lower() for i in order["items"])
+
+
+def test_orders_01_latest_order_is_unique():
+    b = _orders_data("orders_01_damaged_refund")
+    mine = [o for o in b.orders if o["customer_id"] == "C-1042"]
+    assert len(mine) >= 15
+    newest = max(o["placed_at"] for o in mine)
+    assert [o["order_id"] for o in mine if o["placed_at"] == newest] == ["ORD-61230"]
+
+
+def test_orders_02_lost_order_is_unique():
+    b = _orders_data("orders_02_lost_in_transit")
+    mine = [o for o in b.orders if o["customer_id"] == "C-2201"]
+    assert len(mine) >= 15
+    assert [o["order_id"] for o in mine if o["status"] == "lost_in_transit"] == ["ORD-70162"]
+
+
+def test_orders_03_carafe_order_is_unique():
+    b = _orders_data("orders_03_outside_window_credit")
+    mine = [o for o in b.orders if o["customer_id"] == "C-2310"]
+    assert len(mine) >= 15
+    assert [o["order_id"] for o in mine if _mentions(o, "carafe")] == ["ORD-71004"]
+
+
+def test_orders_04_in_window_board_order_is_unique():
+    from datetime import date
+    b = _orders_data("orders_04_wrong_item_line")
+    mine = [o for o in b.orders if o["customer_id"] == "C-1187"]
+    assert len(mine) >= 15
+    boards = [o for o in mine if _mentions(o, "cutting board")]
+    assert len(boards) >= 3, "the out-of-window decoys should still be there"
+    in_window = [o["order_id"] for o in boards if o["status"] == "delivered"
+                 and (date(2026, 10, 20) - date.fromisoformat(o["delivered_at"])).days <= 30]
+    assert in_window == ["ORD-72144"]
+
+
+def test_orders_05_right_priya_and_duvet_order_are_unique():
+    b = _orders_data("orders_05_similar_names")
+    hits = [c for c in b.customers if "priya nair" in c["name"].lower()]
+    assert len(hits) >= 5
+    right = [c for c in hits if c["name"] == "Priya Nair" and c["email"].endswith("@fernhill.example")]
+    assert [c["customer_id"] for c in right] == ["C-3302"]
+    mine = [o for o in b.orders if o["customer_id"] == "C-3302"]
+    assert len(mine) >= 15
+    assert [o["order_id"] for o in mine if _mentions(o, "duvet")] == ["ORD-73055"]
+
+
+def _single_transfer_solutions(task_id, sku, to):
+    """Every single transfer of `sku` into `to` that the grader accepts: (from, quantity) pairs."""
+    task = TASKS_BY_ID[task_id]
+    sites = [w["warehouse_id"] for w in task.make_backend().warehouses]
+    found = []
+    for src in sites:
+        if src == to:
+            continue
+        for qty in range(1, 200):
+            env = Environment(task, BASE)
+            _, is_error = env.call("transfer_stock", {"sku": sku, "from_warehouse_id": src,
+                                                      "to_warehouse_id": to, "quantity": qty})
+            if not is_error and env.grade().success:
+                found.append((src, qty))
+    return found
+
+
+def test_inventory_01_exactly_one_single_transfer_passes():
+    assert _single_transfer_solutions("inventory_01_single_transfer", "WID-204", "BOS") == [("DAL", 28)]
+
+
+def test_inventory_02_surplus_order_is_strict():
+    from tasks.inventory import SplitBackend, _surplus
+    rows = {w: _surplus(v) for (s, w), v in SplitBackend.STOCK.items() if s == "WID-204" and w != "BOS"}
+    assert len(rows) >= 9
+    ranked = sorted(rows.values(), reverse=True)
+    assert ranked[0] == 40 < 45, "no single warehouse may cover the shortfall"
+    assert ranked[0] > ranked[1] > ranked[2], "the first two donors must be unambiguous"
+    assert rows["DAL"] == 40 and rows["PHX"] == 35
+
+
+def test_inventory_03_each_short_sku_has_one_source():
+    from tasks.inventory import MultiSkuBackend, _avail, _surplus
+    stock = MultiSkuBackend.STOCK
+    for sku, need in (("WID-204", 18), ("WID-310", 26)):
+        assert 30 - _avail(stock[(sku, "BOS")]) == need
+        sources = [w for (s, w), v in stock.items() if s == sku and w != "BOS" and _surplus(v) >= need]
+        assert len(sources) == 1, (sku, sources)
+        assert sum(1 for (s, _) in stock if s == sku) >= 7
+    assert _avail(stock[("GAD-550", "BOS")]) >= 30
+
+
+def test_inventory_04_exactly_one_donor_covers_both():
+    from tasks.inventory import RebalanceBackend, _surplus
+    stock = RebalanceBackend.STOCK
+    donors = [w for (s, w), v in stock.items()
+              if s == "WID-410" and w not in ("BOS", "SEA") and _surplus(v) >= 45]
+    assert donors == ["DAL"]
+    assert sum(1 for (s, _) in stock if s == "WID-410") >= 10
+
+
+def test_inventory_05_only_two_skus_are_movable_at_phx():
+    from tasks.inventory import ClosureBackend, _avail
+    phx = {s: v for (s, w), v in ClosureBackend.STOCK.items() if w == "PHX"}
+    assert len(phx) >= 10
+    assert sorted(s for s, v in phx.items() if _avail(v) > 0) == ["GAD-550", "WID-204"]
+
+
+def _support_seed(task_id):
+    return TASKS_BY_ID[task_id].make_backend().tickets
+
+
+def test_support_01_exactly_the_expected_tickets_need_a_priority():
+    tickets = _support_seed("support_01_priority_rules")
+    assert len(tickets) >= 15
+    todo = sorted(t["ticket_id"] for t in tickets if t["status"] == "open" and t["priority"] is None)
+    assert todo == ["T-2101", "T-2102", "T-2103"]
+
+
+def test_support_02_exactly_the_expected_tickets_sit_in_intake():
+    tickets = _support_seed("support_02_route_by_area")
+    assert len(tickets) >= 15
+    todo = sorted(t["ticket_id"] for t in tickets if t["status"] == "open" and t["queue"] == "intake")
+    assert todo == ["T-3101", "T-3102", "T-3103"]
+
+
+def test_support_03_duplicate_pairs_are_exactly_the_expected_ones():
+    tickets = _support_seed("support_03_close_duplicates")
+    assert len(tickets) >= 15
+    resolved = [t for t in tickets if t["status"] == "resolved"]
+    assert all(t["error_code"] is not None for t in resolved)
+    pairs = {(t["ticket_id"], r["ticket_id"]) for t in tickets for r in resolved
+             if t["status"] == "open" and (t["product_area"], t["error_code"]) == (r["product_area"], r["error_code"])}
+    assert pairs == {("T-4101", "T-4100"), ("T-4103", "T-4090")}
+    # The decoy shares a code but not an area.
+    decoy = next(t for t in tickets if t["ticket_id"] == "T-4104")
+    assert decoy["error_code"] == "SSO-114" and decoy["product_area"] != "auth"
+
+
+def test_support_04_exactly_one_open_ticket_breaches():
+    from datetime import datetime
+    from tasks.support import _NOW, _SLA_POLICY
+    targets = {(r["plan"], r["priority"]): r["response_hours"] for r in _SLA_POLICY["targets"]}
+    tickets = _support_seed("support_04_sla_escalation")
+    assert sum(t["status"] == "open" for t in tickets) >= 15
+    breached = []
+    for t in tickets:
+        if t["status"] != "open":
+            continue
+        created = datetime.fromisoformat(t["created_at"])
+        stop = datetime.fromisoformat(t["first_response_at"]) if t["first_response_at"] else _NOW
+        if (stop - created).total_seconds() / 3600 > targets[(t["customer"]["plan"], t["priority"])]:
+            breached.append(t["ticket_id"])
+    assert breached == ["T-5101"]
+
+
+def test_support_05_exactly_the_expected_tickets_ask_to_be_closed():
+    tickets = _support_seed("support_05_close_in_order")
+    assert len(tickets) >= 15
+    open_bodies = {t["ticket_id"]: t["body"].lower() for t in tickets if t["status"] == "open"}
+    assert len(open_bodies) == 6
+    asked = sorted(tid for tid, body in open_bodies.items() if "please close this ticket" in body)
+    assert asked == ["T-6101", "T-6103", "T-6105"]
+    assert "please don't close" in open_bodies["T-6104"]

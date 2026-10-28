@@ -3,34 +3,133 @@
 from __future__ import annotations
 
 import copy
+import random
 from typing import Any
 
 from tasks.base import CallFn, Grade, Task, ToolError, ToolSpec
 
 _WAREHOUSES = [
-    {"warehouse_id": "BOS", "city": "Boston"},
-    {"warehouse_id": "CHI", "city": "Chicago"},
-    {"warehouse_id": "DAL", "city": "Dallas"},
-    {"warehouse_id": "PHX", "city": "Phoenix"},
-    {"warehouse_id": "SEA", "city": "Seattle"},
+    {"warehouse_id": "BOS", "city": "Boston", "region": "northeast", "timezone": "America/New_York",
+     "street_address": "1200 Harbor Way"},
+    {"warehouse_id": "CHI", "city": "Chicago", "region": "midwest", "timezone": "America/Chicago",
+     "street_address": "4410 Industrial Drive"},
+    {"warehouse_id": "DAL", "city": "Dallas", "region": "south", "timezone": "America/Chicago",
+     "street_address": "901 Commerce Parkway"},
+    {"warehouse_id": "PHX", "city": "Phoenix", "region": "southwest", "timezone": "America/Phoenix",
+     "street_address": "3300 Saguaro Boulevard"},
+    {"warehouse_id": "SEA", "city": "Seattle", "region": "northwest", "timezone": "America/Los_Angeles",
+     "street_address": "77 Rainier Avenue"},
+    {"warehouse_id": "ATL", "city": "Atlanta", "region": "southeast", "timezone": "America/New_York",
+     "street_address": "560 Fulton Court"},
+    {"warehouse_id": "DEN", "city": "Denver", "region": "mountain", "timezone": "America/Denver",
+     "street_address": "18 Front Range Road"},
+    {"warehouse_id": "MIA", "city": "Miami", "region": "southeast", "timezone": "America/New_York",
+     "street_address": "2450 Biscayne Trail"},
+    {"warehouse_id": "MSP", "city": "Minneapolis", "region": "midwest", "timezone": "America/Chicago",
+     "street_address": "710 Lakeside Loop"},
+    {"warehouse_id": "NJE", "city": "Newark", "region": "northeast", "timezone": "America/New_York",
+     "street_address": "95 Port Street"},
+    {"warehouse_id": "LAX", "city": "Los Angeles", "region": "west", "timezone": "America/Los_Angeles",
+     "street_address": "6100 Alameda Avenue"},
+    {"warehouse_id": "PDX", "city": "Portland", "region": "northwest", "timezone": "America/Los_Angeles",
+     "street_address": "2 Willamette Row"},
+    {"warehouse_id": "SLC", "city": "Salt Lake City", "region": "mountain", "timezone": "America/Denver",
+     "street_address": "1480 Wasatch Lane"},
+    {"warehouse_id": "CLT", "city": "Charlotte", "region": "southeast", "timezone": "America/New_York",
+     "street_address": "330 Piedmont Way"},
 ]
 
+_SKUS = ["WID-204", "WID-310", "WID-410", "GAD-550", "WID-118", "WID-275", "GAD-120", "GAD-731",
+         "BRK-055", "BRK-402", "CAB-900", "CAB-915", "FLT-230", "FLT-611", "HNG-077", "PMP-340"]
+
+
+def _lv(on_hand: int, reserved: int, safety_stock: int) -> dict[str, int]:
+    return {"on_hand": on_hand, "reserved": reserved, "safety_stock": safety_stock}
+
+
+def _expand(base: dict[tuple[str, str], dict[str, int]], seed: int, fixed: tuple[str, ...],
+            skip: tuple[str, ...] = ()) -> dict[tuple[str, str], dict[str, int]]:
+    """Add seeded filler rows for SKUs a task does not mention.
+
+    Rows for the task's own SKUs (`fixed`) are always hand-written so their levels can be reasoned
+    about; warehouses in `skip` get no filler at all.
+    """
+    rng = random.Random(seed)
+    stock = dict(base)
+    for w in _WAREHOUSES:
+        wid = w["warehouse_id"]
+        if wid in skip:
+            continue
+        for sku in _SKUS:
+            if sku in fixed or (sku, wid) in stock or rng.random() < 0.45:
+                continue
+            on_hand = rng.randint(8, 180)
+            stock[(sku, wid)] = _lv(on_hand, rng.randint(0, on_hand * 2 // 3), rng.randint(4, 30))
+    return stock
+
+
 # (sku, warehouse_id) -> levels. Available = on_hand - reserved. For WID-204 only DAL can
-# cover BOS's shortfall of 28 while staying at or above its safety stock: CHI, PHX and SEA
-# all have enough on hand but not enough available above safety stock.
-_STOCK = {
-    ("WID-204", "BOS"): {"on_hand": 20, "reserved": 8, "safety_stock": 5},
-    ("WID-204", "CHI"): {"on_hand": 40, "reserved": 5, "safety_stock": 20},
-    ("WID-204", "DAL"): {"on_hand": 60, "reserved": 10, "safety_stock": 15},
-    ("WID-204", "PHX"): {"on_hand": 80, "reserved": 55, "safety_stock": 10},
-    ("WID-204", "SEA"): {"on_hand": 90, "reserved": 70, "safety_stock": 10},
-    ("WID-310", "BOS"): {"on_hand": 14, "reserved": 0, "safety_stock": 5},
-    ("WID-310", "DAL"): {"on_hand": 120, "reserved": 30, "safety_stock": 25},
-}
+# cover BOS's shortfall of 28 while staying at or above its safety stock: CHI, PHX, SEA, ATL and
+# DEN all have enough on hand but not enough available above safety stock.
+_STOCK = _expand({
+    ("WID-204", "BOS"): _lv(20, 8, 5),
+    ("WID-204", "CHI"): _lv(40, 5, 20),
+    ("WID-204", "DAL"): _lv(60, 10, 15),
+    ("WID-204", "PHX"): _lv(80, 55, 10),
+    ("WID-204", "SEA"): _lv(90, 70, 10),
+    ("WID-204", "ATL"): _lv(36, 12, 10),   # 24 available: short of the 28 needed
+    ("WID-204", "DEN"): _lv(55, 20, 15),   # 35 available, but only 20 above safety stock
+    ("WID-310", "BOS"): _lv(14, 0, 5),
+    ("WID-310", "DAL"): _lv(120, 30, 25),
+}, seed=101, fixed=("WID-204", "WID-310"))
 
 SKU = "WID-204"
 TARGET = "BOS"
 TARGET_AVAILABLE = 40
+
+
+# ---------------------------------------------------------------------------
+# Presentation: realistic but irrelevant fields, derived deterministically from each entity's ID.
+
+def _rng(*parts: str) -> random.Random:
+    return random.Random("inventory:" + ":".join(parts))
+
+
+def _warehouse_view(w: dict[str, Any], stocked: list[str]) -> dict[str, Any]:
+    rng = _rng("site", w["warehouse_id"])
+    first = rng.choice(["Maria", "Devon", "Priya", "Jonah", "Elena", "Kofi", "Hannah", "Luis"])
+    last = rng.choice(["Okafor", "Lindqvist", "Castillo", "Nakamura", "Brennan", "Haddad", "Petrov"])
+    return {
+        "warehouse_id": w["warehouse_id"],
+        "city": w["city"],
+        "region": w["region"],
+        "status": "active",
+        "timezone": w["timezone"],
+        "street_address": w["street_address"],
+        "dock_doors": rng.choice([4, 6, 8, 12, 16]),
+        "site_manager": f"{first} {last}",
+        "commissioned_at": f"{rng.randint(2009, 2024)}-{rng.randint(1, 12):02d}-{rng.randint(1, 28):02d}",
+        "cutoff_time": rng.choice(["14:00", "15:00", "16:30", "17:00"]),
+        "stocked_skus": stocked,
+    }
+
+
+def _row_view(sku: str, warehouse_id: str, lv: dict[str, int]) -> dict[str, Any]:
+    rng = _rng("row", sku, warehouse_id)
+    return {
+        "sku": sku,
+        "warehouse_id": warehouse_id,
+        "bin_location": f"{rng.choice('ABCDEF')}-{rng.randint(1, 40):02d}-{rng.randint(1, 8):02d}",
+        "on_hand": lv["on_hand"],
+        "inbound_units": rng.choice([0, 0, 0, 12, 24, 36, 48]),
+        "reserved": lv["reserved"],
+        "unit_cost": rng.choice([4.2, 7.85, 12.4, 19.99, 23.5, 41.0]),
+        "safety_stock": lv["safety_stock"],
+        "unit_of_measure": "each",
+        "supplier": rng.choice(["Northwind Components", "Acme Fabrication", "Keystone Supply", "Harbor Metals"]),
+        "lead_time_days": rng.choice([5, 7, 10, 14, 21]),
+        "last_counted_at": f"2026-{rng.randint(8, 10):02d}-{rng.randint(1, 18):02d}",
+    }
 
 
 class InventoryBackend:
@@ -57,23 +156,29 @@ class InventoryBackend:
         return self.stock[(sku, warehouse_id)]
 
     def list_warehouses(self) -> dict[str, Any]:
-        return {"warehouses": copy.deepcopy(self.warehouses)}
+        return {"warehouses": [
+            _warehouse_view(w, sorted(s for (s, wid) in self.stock if wid == w["warehouse_id"]))
+            for w in self.warehouses
+        ]}
 
     def get_stock(self, sku: str, warehouse_id: str) -> dict[str, Any]:
-        levels = self._levels(sku, warehouse_id)
-        return {"sku": sku, "warehouse_id": warehouse_id, **levels}
+        return _row_view(sku, warehouse_id, self._levels(sku, warehouse_id))
 
     def get_sku_stock(self, sku: str) -> dict[str, Any]:
         rows = [(w, v) for (s, w), v in sorted(self.stock.items()) if s == sku]
         if not rows:
             raise ToolError(f"Unknown SKU {sku!r}.")
-        return {"sku": sku, "warehouses": [{"warehouse_id": w, **v} for w, v in rows]}
+        return {"sku": sku, "warehouses": [
+            {k: v for k, v in _row_view(sku, w, lv).items() if k != "sku"} for w, lv in rows
+        ]}
 
     def get_warehouse_stock(self, warehouse_id: str) -> dict[str, Any]:
         if not any(w["warehouse_id"] == warehouse_id for w in self.warehouses):
             raise ToolError(f"No warehouse with ID {warehouse_id!r}.")
-        items = [{"sku": s, **v} for (s, w), v in sorted(self.stock.items()) if w == warehouse_id]
-        return {"warehouse_id": warehouse_id, "items": items}
+        rows = [(s, v) for (s, w), v in sorted(self.stock.items()) if w == warehouse_id]
+        return {"warehouse_id": warehouse_id, "items": [
+            {k: v for k, v in _row_view(s, warehouse_id, lv).items() if k != "warehouse_id"} for s, lv in rows
+        ]}
 
     def transfer_stock(self, sku: str, from_warehouse_id: str, to_warehouse_id: str, quantity: int) -> dict[str, Any]:
         if from_warehouse_id == to_warehouse_id:
@@ -97,7 +202,8 @@ class InventoryBackend:
             "quantity": quantity,
         }
         self.transfers.append(transfer)
-        return dict(transfer)
+        return {**transfer, "status": "completed", "carrier": "internal_fleet",
+                "requested_at": f"2026-10-20T09:{len(self.transfers):02d}"}
 
     def snapshot(self) -> dict[str, Any]:
         return {
@@ -123,8 +229,9 @@ def grade(backend: InventoryBackend) -> Grade:
 
 
 def reference_solution(call: CallFn) -> None:
-    warehouses = [w["warehouse_id"] for w in call("list_warehouses")["warehouses"]]
-    levels = {w: call("get_stock", sku=SKU, warehouse_id=w) for w in warehouses}
+    sites = call("list_warehouses")["warehouses"]
+    holders = [w["warehouse_id"] for w in sites if SKU in w["stocked_skus"]]
+    levels = {w: call("get_stock", sku=SKU, warehouse_id=w) for w in holders}
     target = levels[TARGET]
     shortfall = TARGET_AVAILABLE - (target["on_hand"] - target["reserved"])
     for w, lv in levels.items():
@@ -137,8 +244,8 @@ def reference_solution(call: CallFn) -> None:
 TOOLS = (
     ToolSpec(
         name="list_warehouses",
-        description="List all warehouses in the network with their IDs and cities.",
-        paraphrase="Return every warehouse in the network, along with its ID and city.",
+        description="List all warehouses in the network with their IDs, cities and the SKUs each one stocks.",
+        paraphrase="Return every warehouse in the network, along with its ID, city and the SKUs it holds.",
         input_schema={"type": "object", "properties": {}, "additionalProperties": False},
     ),
     ToolSpec(
@@ -199,10 +306,6 @@ TASKS = [
 
 # --- inventory_02..05 ---------------------------------------------------------------------------
 
-def _lv(on_hand: int, reserved: int, safety_stock: int) -> dict[str, int]:
-    return {"on_hand": on_hand, "reserved": reserved, "safety_stock": safety_stock}
-
-
 def _grade_on_hand(backend: InventoryBackend, moves: dict[tuple[str, str], int]) -> Grade:
     """Whole-state check: on-hand units everywhere must equal the start plus `moves`, nothing else touched."""
     base = backend.STOCK
@@ -227,15 +330,21 @@ def _surplus(lv: dict[str, int]) -> int:
 
 
 # inventory_02: no single source can cover the shortfall; sources are used by largest surplus first.
-# CHI has the most on hand but most of it is reserved, so it is the last choice by surplus.
+# CHI has the most on hand but most of it is reserved, so it is a late choice by surplus. Surpluses:
+# DAL 40, PHX 35, ATL 30, PDX 25, LAX 20, CHI 15, DEN 10, SEA 2, MIA 0.
 class SplitBackend(InventoryBackend):
-    STOCK = {
+    STOCK = _expand({
         ("WID-204", "BOS"): _lv(12, 2, 5),
         ("WID-204", "CHI"): _lv(100, 75, 10),
         ("WID-204", "DAL"): _lv(70, 10, 20),
         ("WID-204", "PHX"): _lv(50, 5, 10),
         ("WID-204", "SEA"): _lv(30, 0, 28),
-    }
+        ("WID-204", "ATL"): _lv(48, 10, 8),
+        ("WID-204", "DEN"): _lv(90, 70, 10),
+        ("WID-204", "MIA"): _lv(26, 6, 20),
+        ("WID-204", "LAX"): _lv(140, 100, 20),
+        ("WID-204", "PDX"): _lv(33, 3, 5),
+    }, seed=102, fixed=("WID-204",))
 
 
 def grade_split(backend: InventoryBackend) -> Grade:
@@ -244,6 +353,7 @@ def grade_split(backend: InventoryBackend) -> Grade:
 
 
 def reference_split(call: CallFn) -> None:
+    call("list_warehouses")
     rows = call("get_sku_stock", sku="WID-204")["warehouses"]
     bos = next(r for r in rows if r["warehouse_id"] == "BOS")
     need = 55 - _avail(bos)
@@ -258,21 +368,32 @@ def reference_split(call: CallFn) -> None:
             need -= qty
 
 
-# inventory_03: three SKUs; each has exactly one source that stays above safety stock, and one needs nothing.
+# inventory_03: three SKUs; each short SKU has exactly one source that stays above safety stock
+# (WID-204 needs 18: only DAL's surplus of 25 covers it; WID-310 needs 26: only CHI's 35), and
+# GAD-550 needs nothing.
 class MultiSkuBackend(InventoryBackend):
-    STOCK = {
+    STOCK = _expand({
         ("WID-204", "BOS"): _lv(20, 8, 5),
         ("WID-204", "CHI"): _lv(50, 10, 30),
         ("WID-204", "DAL"): _lv(40, 0, 15),
         ("WID-204", "PHX"): _lv(90, 70, 5),
+        ("WID-204", "ATL"): _lv(30, 10, 5),
+        ("WID-204", "SEA"): _lv(44, 20, 10),
+        ("WID-204", "LAX"): _lv(25, 5, 10),
         ("WID-310", "BOS"): _lv(9, 5, 3),
         ("WID-310", "CHI"): _lv(80, 20, 25),
         ("WID-310", "DAL"): _lv(30, 0, 10),
         ("WID-310", "PHX"): _lv(120, 100, 0),
+        ("WID-310", "ATL"): _lv(60, 30, 10),
+        ("WID-310", "SEA"): _lv(50, 25, 5),
+        ("WID-310", "MIA"): _lv(28, 0, 10),
         ("GAD-550", "BOS"): _lv(34, 4, 6),
         ("GAD-550", "CHI"): _lv(60, 5, 10),
         ("GAD-550", "DAL"): _lv(45, 0, 10),
-    }
+        ("GAD-550", "SEA"): _lv(40, 10, 10),
+        ("GAD-550", "PHX"): _lv(55, 50, 5),
+        ("GAD-550", "ATL"): _lv(12, 2, 4),
+    }, seed=103, fixed=("WID-204", "WID-310", "GAD-550"))
 
 
 def grade_multi(backend: InventoryBackend) -> Grade:
@@ -283,6 +404,7 @@ def grade_multi(backend: InventoryBackend) -> Grade:
 
 
 def reference_multi(call: CallFn) -> None:
+    call("list_warehouses")
     for sku in ("WID-204", "WID-310", "GAD-550"):
         rows = call("get_sku_stock", sku=sku)["warehouses"]
         bos = next(r for r in rows if r["warehouse_id"] == "BOS")
@@ -293,15 +415,21 @@ def reference_multi(call: CallFn) -> None:
         call("transfer_stock", sku=sku, from_warehouse_id=source["warehouse_id"], to_warehouse_id="BOS", quantity=need)
 
 
-# inventory_04: two warehouses to top up from one common donor; only DAL can cover both shortfalls.
+# inventory_04: two warehouses to top up from one common donor; only DAL (surplus 50) can cover
+# both shortfalls (45 in total). ATL's surplus of 40 is the nearest miss.
 class RebalanceBackend(InventoryBackend):
-    STOCK = {
+    STOCK = _expand({
         ("WID-410", "BOS"): _lv(30, 5, 5),
         ("WID-410", "CHI"): _lv(100, 40, 25),
         ("WID-410", "DAL"): _lv(95, 25, 20),
         ("WID-410", "PHX"): _lv(220, 170, 30),
         ("WID-410", "SEA"): _lv(14, 4, 5),
-    }
+        ("WID-410", "ATL"): _lv(80, 30, 10),
+        ("WID-410", "MIA"): _lv(60, 20, 5),
+        ("WID-410", "LAX"): _lv(150, 120, 10),
+        ("WID-410", "DEN"): _lv(40, 10, 5),
+        ("WID-410", "PDX"): _lv(20, 10, 5),
+    }, seed=104, fixed=("WID-410",))
 
 
 def grade_rebalance(backend: InventoryBackend) -> Grade:
@@ -309,6 +437,7 @@ def grade_rebalance(backend: InventoryBackend) -> Grade:
 
 
 def reference_rebalance(call: CallFn) -> None:
+    call("list_warehouses")
     rows = call("get_sku_stock", sku="WID-410")["warehouses"]
     targets = {r["warehouse_id"]: 40 - _avail(r) for r in rows if r["warehouse_id"] in ("BOS", "SEA")}
     total = sum(targets.values())
@@ -319,9 +448,10 @@ def reference_rebalance(call: CallFn) -> None:
                  to_warehouse_id=wh, quantity=qty)
 
 
-# inventory_05: closing PHX; only unreserved units move, and one SKU is fully reserved.
+# inventory_05: closing PHX; only unreserved units move. Besides the two SKUs with unreserved units,
+# PHX holds several that are fully reserved or out of stock, so there is nothing to move for them.
 class ClosureBackend(InventoryBackend):
-    STOCK = {
+    STOCK = _expand({
         ("WID-204", "BOS"): _lv(20, 8, 5),
         ("WID-204", "DAL"): _lv(40, 10, 15),
         ("WID-204", "PHX"): _lv(60, 35, 10),
@@ -331,7 +461,14 @@ class ClosureBackend(InventoryBackend):
         ("GAD-550", "BOS"): _lv(34, 4, 6),
         ("GAD-550", "DAL"): _lv(22, 2, 8),
         ("GAD-550", "PHX"): _lv(48, 12, 8),
-    }
+        ("WID-410", "PHX"): _lv(40, 40, 10),
+        ("GAD-120", "PHX"): _lv(18, 18, 5),
+        ("FLT-230", "PHX"): _lv(12, 12, 2),
+        ("PMP-340", "PHX"): _lv(9, 9, 3),
+        ("BRK-055", "PHX"): _lv(0, 0, 4),
+        ("CAB-900", "PHX"): _lv(0, 0, 6),
+        ("HNG-077", "PHX"): _lv(0, 0, 3),
+    }, seed=105, fixed=("WID-204", "WID-310", "GAD-550"), skip=("PHX",))
 
 
 def grade_closure(backend: InventoryBackend) -> Grade:
@@ -342,6 +479,7 @@ def grade_closure(backend: InventoryBackend) -> Grade:
 
 
 def reference_closure(call: CallFn) -> None:
+    call("list_warehouses")
     for item in call("get_warehouse_stock", warehouse_id="PHX")["items"]:
         movable = _avail(item)
         if movable > 0:
