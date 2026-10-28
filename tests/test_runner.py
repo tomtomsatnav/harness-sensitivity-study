@@ -1,7 +1,10 @@
 """Agent loop tests against a scripted fake client (no API calls)."""
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
+
+import pytest
 
 from perturb import CONDITIONS
 from runner.agent import run_episode
@@ -123,3 +126,22 @@ def test_refusal():
     client = FakeClient([Response([], "refusal")])
     r = run_episode(client, "fake-model", INVENTORY, CONDITIONS["baseline"], 0)
     assert r.status == "refusal" and r.success is False
+
+
+def test_load_done_skips_truncated_line_and_reports_settings(tmp_path):
+    from runner.run import load_done
+
+    good = Path("results/pilot.jsonl").read_text().splitlines()[0]
+    path = tmp_path / "eps.jsonl"
+    path.write_text(good + "\n\n" + good[:200])  # blank line, then a line cut off mid-write
+    done, settings = load_done(path)
+    assert len(done) == 1 and settings == {(None, 15)}
+
+
+def test_run_refuses_to_mix_settings(tmp_path):
+    from runner.run import main
+
+    path = tmp_path / "eps.jsonl"
+    path.write_text(Path("results/pilot.jsonl").read_text().splitlines()[0] + "\n")
+    with pytest.raises(SystemExit):
+        main(["--models", "haiku", "--effort", "low", "--out", str(path), "--dry-run"])
