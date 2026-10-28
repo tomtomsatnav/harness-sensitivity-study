@@ -30,7 +30,7 @@ MODELS = {
     "opus": "claude-opus-5-5",
 }
 
-PILOT = {"models": list(MODELS), "n_tasks": 2, "runs": 2, "out": "results/pilot.jsonl"}
+PILOT = {"models": list(MODELS), "tasks": ["orders_01_damaged_refund", "inventory_01_single_transfer"], "runs": 2, "out": "results/pilot.jsonl"}
 
 
 def load_done(path: Path) -> set[tuple[str, str, str, int]]:
@@ -62,7 +62,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.pilot:
         args.models, args.runs, args.out = PILOT["models"], PILOT["runs"], PILOT["out"]
-        tasks = ALL_TASKS[: PILOT["n_tasks"]]
+        tasks = [TASKS_BY_ID[t] for t in PILOT["tasks"]]
     else:
         tasks = ALL_TASKS if args.tasks == ["all"] else [TASKS_BY_ID[t] for t in args.tasks]
 

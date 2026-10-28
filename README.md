@@ -6,8 +6,9 @@ research question, hypotheses and plan.
 
 ## Status
 
-Build-plan steps 1–3 are in place: the task framework with 2 tasks, the perturbation
-conditions with guard tests, and the agent loop with pilot and costing tooling. Analysis
+Build-plan steps 1–4 are in place: all 25 tasks (5 per domain: orders, inventory, records,
+scheduling, support), the perturbation conditions with guard tests, and the agent loop with
+pilot and costing tooling. The pilot uses `orders_01` and `inventory_01`. Analysis
 (bootstrap CIs, headline chart, flipped-episode sampler) is scaffolded and tested on
 synthetic data. The pilot has not been run yet.
 
