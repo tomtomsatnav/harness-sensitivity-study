@@ -489,3 +489,36 @@ def test_scheduling_rejects_off_grid_start():
     name, args = _book("R-CEDAR", "10:15", "11:45", _FOUR)
     _, is_error = env.call(name, args)
     assert is_error and env.tool_errors == 1
+
+
+# --- denser observations: records and scheduling ----------------------------------------------------
+
+_DENSE_IDS = [t.task_id for t in ALL_TASKS if t.domain in ("records", "scheduling")]
+
+
+def _tokens(obs):
+    import json
+    return len(json.dumps(obs)) / 3.6
+
+
+@pytest.mark.parametrize("task_id", _DENSE_IDS)
+def test_records_scheduling_observation_budget(task_id):
+    """The reference solution sees 2,500-5,000 tokens of observations in total, none above 2,500."""
+    _, log = run_reference(TASKS_BY_ID[task_id], BASE)
+    sizes = [_tokens(obs) for _, _, obs in log]
+    assert 2500 <= sum(sizes) <= 5000, f"total {sum(sizes):.0f}"
+    assert max(sizes) <= 2500, f"largest observation {max(sizes):.0f}"
+
+
+def test_records_duplicate_pair_is_unique():
+    """Exactly the survivor and loser are active records sharing the target's name and date of birth,
+    so the merge rules, which only ever read those two records, yield one field set."""
+    from tasks import records
+    for key, sc in records._SCENARIOS.items():
+        backend = records.RecordsBackend(key)
+        target = backend._record(sc["survivor"])
+        twins = sorted(r["record_id"] for r in backend.records if r["status"] == "active"
+                       and (r["name"], r["date_of_birth"]) == (target["name"], target["date_of_birth"]))
+        assert twins == sorted([sc["survivor"], sc["loser"]]), key
+        ids = [r["record_id"] for r in backend.records]
+        assert len(ids) == len(set(ids)), key

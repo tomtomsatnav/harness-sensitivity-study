@@ -11,6 +11,7 @@ Each scenario is built so that exactly one (start, room) pair satisfies every co
 from __future__ import annotations
 
 import copy
+import random
 from dataclasses import dataclass, replace
 from functools import partial
 from typing import Any
@@ -41,32 +42,110 @@ def _overlap(a_start: int, a_end: int, b_start: int, b_end: int) -> bool:
 
 # ---------------------------------------------------------------- scenario data
 
-_ROOMS = {
-    "R-ATLAS": {"room_id": "R-ATLAS", "name": "Atlas", "capacity": 8, "floor": 2, "equipment": ["video_conference", "projector"]},
-    "R-BIRCH": {"room_id": "R-BIRCH", "name": "Birch", "capacity": 4, "floor": 1, "equipment": ["video_conference", "whiteboard"]},
-    "R-CEDAR": {"room_id": "R-CEDAR", "name": "Cedar", "capacity": 12, "floor": 3, "equipment": ["projector", "whiteboard"]},
-    "R-DUNE": {"room_id": "R-DUNE", "name": "Dune", "capacity": 6, "floor": 1, "equipment": ["whiteboard"]},
-    "R-EMBER": {"room_id": "R-EMBER", "name": "Ember", "capacity": 6, "floor": 0, "equipment": ["video_conference", "projector"]},
-    "R-NOOK": {"room_id": "R-NOOK", "name": "Nook", "capacity": 2, "floor": 0, "equipment": []},
+def _room(room_id: str, name: str, building: str, floor: int, wing: str, capacity: int, extension: int,
+          equipment: list[str], catering: bool, accessible: bool, contact: str) -> dict[str, Any]:
+    """A room as list_rooms reports it. Only capacity, floor and equipment ever matter to a booking rule."""
+    return {"room_id": room_id, "name": name, "building": building, "floor": floor, "wing": wing,
+            "capacity": capacity, "phone_extension": extension, "equipment": equipment, "catering": catering,
+            "accessible": accessible, "booking_contact": contact}
+
+
+# The six original rooms plus twelve more. Every added room fails at least one of each scenario's room
+# requirements (capacity, equipment, floor) or is booked through the attendees' free windows; the
+# uniqueness test in tests/test_tasks.py checks the result.
+_ROOMS = {r["room_id"]: r for r in (
+    _room("R-EMBER", "Ember", "North", 0, "east", 6, 4010, ["video_conference", "projector"], True, True, "facilities-north"),
+    _room("R-NOOK", "Nook", "North", 0, "west", 2, 4011, [], False, True, "facilities-north"),
+    _room("R-BIRCH", "Birch", "North", 1, "east", 4, 4110, ["video_conference", "whiteboard"], False, True, "facilities-north"),
+    _room("R-DUNE", "Dune", "North", 1, "west", 6, 4111, ["whiteboard"], True, True, "facilities-north"),
+    _room("R-HAVEN", "Haven", "North", 1, "west", 3, 4112, ["video_conference"], False, False, "facilities-north"),
+    _room("R-ATLAS", "Atlas", "North", 2, "east", 8, 4210, ["video_conference", "projector"], True, True, "facilities-north"),
+    _room("R-FERN", "Fern", "North", 2, "west", 4, 4211, ["whiteboard"], False, True, "facilities-north"),
+    _room("R-CEDAR", "Cedar", "North", 3, "east", 12, 4310, ["projector", "whiteboard"], True, True, "facilities-north"),
+    _room("R-GROVE", "Grove", "North", 3, "west", 10, 4311, ["video_conference", "projector", "whiteboard"], True, True, "facilities-north"),
+    _room("R-MAPLE", "Maple", "South", 0, "east", 6, 5010, ["projector"], True, True, "facilities-south"),
+    _room("R-OPAL", "Opal", "South", 0, "west", 2, 5011, ["video_conference"], False, True, "facilities-south"),
+    _room("R-JUNO", "Juno", "South", 1, "east", 2, 5110, ["video_conference"], False, False, "facilities-south"),
+    _room("R-PINE", "Pine", "South", 1, "west", 4, 5111, ["projector"], False, True, "facilities-south"),
+    _room("R-IRIS", "Iris", "South", 2, "east", 1, 5210, [], False, False, "facilities-south"),
+    _room("R-LARK", "Lark", "South", 2, "east", 5, 5211, ["whiteboard", "projector"], True, True, "facilities-south"),
+    _room("R-QUAY", "Quay", "South", 2, "west", 8, 5212, ["projector"], True, True, "facilities-south"),
+    _room("R-KITE", "Kite", "South", 3, "east", 16, 5310, ["projector"], True, True, "facilities-south"),
+    _room("R-REEF", "Reef", "South", 3, "west", 3, 5311, [], False, False, "facilities-south"),
+)}
+
+_ALL_ROOMS = tuple(_ROOMS)
+
+# (name, email, department, IANA time zone)
+_PEOPLE = {
+    "P-ANA": ("Ana Ruiz", "ana.ruiz@example.com", "product", "America/New_York"),
+    "P-BEN": ("Ben Okafor", "ben.okafor@example.com", "engineering", "America/New_York"),
+    "P-CHL": ("Chloe Marsh", "chloe.marsh@example.com", "design", "America/New_York"),
+    "P-DEV": ("Dev Patel", "dev.patel@example.com", "engineering", "America/New_York"),
+    "P-ELI": ("Eli Novak", "eli.novak@example.com", "finance", "America/New_York"),
+    "P-PRI": ("Priya Nair", "priya.nair@example.com", "product", "America/New_York"),
+    "P-TOM": ("Tom Hale", "tom.hale@example.com", "sales", "Europe/London"),
+    "P-SVE": ("Sven Berg", "sven.berg@example.com", "engineering", "Europe/Berlin"),
 }
 
-_NAMES = {
-    "P-ANA": "Ana Ruiz", "P-BEN": "Ben Okafor", "P-CHL": "Chloe Marsh", "P-DEV": "Dev Patel",
-    "P-ELI": "Eli Novak", "P-PRI": "Priya Nair", "P-TOM": "Tom Hale", "P-SVE": "Sven Berg",
-}
+_ORGANIZERS = ["Ana Ruiz", "Ben Okafor", "Maya Lindqvist", "Omar Haddad", "Facilities", "Chloe Marsh", "HR team"]
+_VENUES = ["Zoom", "Teams", "Phone", "Cafeteria", "Desk", "Offsite", "Client site"]
+_RECURRENCES = ["none", "none", "none", "weekly", "fortnightly"]
+_CATERING = ["none", "none", "coffee", "lunch_boxes", "water_only"]
 
 
 def _person(pid: str, busy: list[tuple[str, str, str]], offset: int = HQ_UTC_OFFSET) -> dict[str, Any]:
-    """Working hours are 09:00-17:00 local. `busy` entries are (start, end, subject) in local time."""
+    """Working hours are 09:00-17:00 local. `busy` entries are (start, end, subject) in local time.
+
+    The calendar-sync columns (event IDs, organisers, venues) are fixed by seed and carry no rule.
+    """
+    name, email, department, time_zone = _PEOPLE[pid]
+    blocks = []
+    for a, b, subject in busy:
+        rng = random.Random(f"{pid}:{a}:{subject}")
+        blocks.append({"event_id": f"EV-{rng.randint(10000, 99999)}", "subject": subject,
+                       "organizer": rng.choice(_ORGANIZERS), "start": a, "end": b,
+                       "venue": rng.choice(_VENUES), "show_as": "busy"})
     return {
-        "name": _NAMES[pid], "utc_offset_hours": offset, "work_start": "09:00", "work_end": "17:00",
-        "busy": [{"subject": s, "start": a, "end": b} for a, b, s in busy],
+        "name": name, "email": email, "department": department, "time_zone": time_zone,
+        "utc_offset_hours": offset, "work_start": "09:00", "work_end": "17:00",
+        "calendar_id": f"cal-{pid.lower()}", "busy": blocks,
     }
 
 
+def _booking_extras(booking_id: str, organizer_id: str) -> dict[str, Any]:
+    rng = random.Random(f"booking:{booking_id}")
+    return {"organizer_id": organizer_id, "recurrence": rng.choice(_RECURRENCES),
+            "cost_centre": f"CC-{rng.randint(1000, 1999)}", "catering_order": rng.choice(_CATERING),
+            "created_at": f"2026-10-{rng.randint(1, 28):02d}"}
+
+
 def _booking(booking_id: str, subject: str, room_id: str, start: str, end: str, attendees: list[str]) -> dict[str, Any]:
-    return {"booking_id": booking_id, "subject": subject, "room_id": room_id, "start": _ts(_m(start)),
-            "end": _ts(_m(end)), "attendee_ids": attendees, "status": "confirmed"}
+    extras = _booking_extras(booking_id, attendees[0])
+    return {"booking_id": booking_id, "subject": subject, "organizer_id": extras["organizer_id"], "room_id": room_id,
+            "start": _ts(_m(start)), "end": _ts(_m(end)), "attendee_ids": attendees,
+            "recurrence": extras["recurrence"], "cost_centre": extras["cost_centre"],
+            "catering_order": extras["catering_order"], "created_at": extras["created_at"], "status": "confirmed"}
+
+
+# Other teams' bookings, present in every scenario. They sit in rooms that no scenario's room
+# requirements admit (too small, missing equipment, wrong floor) or, for Grove, block the whole day.
+_FILLER = (
+    _booking("BK-8101", "Leadership offsite", "R-GROVE", "08:30", "17:30", ["P-OPS", "P-KAI", "P-LIA", "P-MAX"]),
+    _booking("BK-8102", "Payroll review", "R-KITE", "09:00", "10:00", ["P-NIA", "P-OWE"]),
+    _booking("BK-8103", "Recruiter screen", "R-JUNO", "09:30", "10:00", ["P-RAJ"]),
+    _booking("BK-8104", "Vendor onboarding", "R-PINE", "10:00", "11:30", ["P-UMA", "P-WES"]),
+    _booking("BK-8105", "All-hands rehearsal", "R-KITE", "11:00", "12:00", ["P-OPS", "P-YAS"]),
+    _booking("BK-8106", "Focus block", "R-IRIS", "10:30", "12:30", ["P-NIA"]),
+    _booking("BK-8107", "Legal check-in", "R-REEF", "11:30", "12:00", ["P-KAI", "P-LIA"]),
+    _booking("BK-8108", "Partner call", "R-OPAL", "12:30", "13:00", ["P-MAX"]),
+    _booking("BK-8109", "Design review", "R-QUAY", "13:00", "14:30", ["P-OWE", "P-RAJ", "P-UMA"]),
+    _booking("BK-8110", "Security briefing", "R-KITE", "14:00", "15:30", ["P-WES", "P-YAS", "P-NIA"]),
+    _booking("BK-8111", "Phone screen", "R-NOOK", "14:30", "15:00", ["P-LIA"]),
+    _booking("BK-8112", "Data sync", "R-PINE", "15:00", "16:00", ["P-KAI"]),
+    _booking("BK-8113", "Investor prep", "R-QUAY", "15:30", "17:00", ["P-OPS", "P-MAX"]),
+    _booking("BK-8114", "Wrap-up", "R-REEF", "16:30", "17:00", ["P-YAS"]),
+)
 
 
 @dataclass(frozen=True)
@@ -89,13 +168,13 @@ class Scenario:
 # (free) are decoys that fail on equipment and capacity.
 _S01 = Scenario(
     people={
-        "P-ANA": _person("P-ANA", [("09:00", "09:30", "Standup"), ("11:00", "13:00", "Offsite prep"), ("14:30", "16:00", "Design crit")]),
+        "P-ANA": _person("P-ANA", [("09:00", "09:30", "Standup"), ("11:00", "13:00", "Offsite prep"), ("14:30", "16:00", "Design crit"), ("17:15", "18:00", "School run")]),
         "P-BEN": _person("P-BEN", [("09:00", "09:30", "Standup"), ("10:30", "12:30", "Vendor call"), ("14:30", "16:00", "Sprint planning")]),
         "P-CHL": _person("P-CHL", [("09:00", "09:30", "Standup"), ("10:30", "13:00", "Customer visit"), ("14:30", "16:00", "Hiring sync")]),
         "P-DEV": _person("P-DEV", [("09:00", "09:30", "Standup"), ("10:30", "11:00", "1:1"), ("11:30", "13:00", "Deep work"), ("14:30", "16:00", "Incident review")]),
-        "P-ELI": _person("P-ELI", [("09:00", "09:30", "Standup"), ("10:30", "13:00", "Training"), ("14:30", "15:00", "1:1"), ("15:00", "16:00", "Budget review")]),
+        "P-ELI": _person("P-ELI", [("08:00", "08:45", "Gym"), ("09:00", "09:30", "Standup"), ("10:30", "13:00", "Training"), ("14:30", "15:00", "1:1"), ("15:00", "16:00", "Budget review")]),
     },
-    rooms=("R-ATLAS", "R-BIRCH", "R-CEDAR", "R-DUNE", "R-EMBER"),
+    rooms=_ALL_ROOMS,
     bookings=(
         _booking("BK-9101", "Finance sync", "R-ATLAS", "09:00", "11:00", ["P-OPS"]),
         _booking("BK-9102", "Roadmap review", "R-ATLAS", "13:30", "17:00", ["P-OPS"]),
@@ -103,6 +182,10 @@ _S01 = Scenario(
         _booking("BK-9104", "Hiring panel", "R-EMBER", "12:00", "13:30", ["P-OPS"]),
         _booking("BK-9105", "Team lunch", "R-EMBER", "15:00", "17:00", ["P-OPS"]),
         _booking("BK-9106", "Board prep", "R-CEDAR", "13:00", "14:00", ["P-OPS"]),
+        _booking("BK-9641", "Ops planning", "R-HAVEN", "13:00", "14:00", ["P-RAJ"]),
+        _booking("BK-9642", "Sprint demo", "R-LARK", "09:30", "10:30", ["P-UMA", "P-WES"]),
+        _booking("BK-9643", "Facilities walk-through", "R-MAPLE", "13:30", "14:30", ["P-OPS", "P-NIA"]),
+        *_FILLER,
     ),
     policy=None,
     attendees=("P-ANA", "P-BEN", "P-CHL", "P-DEV", "P-ELI"),
@@ -113,16 +196,20 @@ _S01 = Scenario(
 # 02: three time zones, video conference. Working hours overlap only from 09:00 to 11:00 HQ time.
 _S02 = Scenario(
     people={
-        "P-PRI": _person("P-PRI", [("09:00", "09:30", "Standup"), ("12:00", "13:00", "Lunch"), ("14:00", "15:00", "Vendor call")], -5),
-        "P-TOM": _person("P-TOM", [("10:00", "11:30", "Planning"), ("12:00", "13:00", "Lunch")], 0),
+        "P-PRI": _person("P-PRI", [("08:15", "08:45", "Commute"), ("09:00", "09:30", "Standup"), ("12:00", "13:00", "Lunch"), ("14:00", "15:00", "Vendor call")], -5),
+        "P-TOM": _person("P-TOM", [("10:00", "11:30", "Planning"), ("12:00", "13:00", "Lunch"), ("17:30", "18:30", "Football")], 0),
         "P-SVE": _person("P-SVE", [("09:00", "12:00", "Workshop"), ("12:30", "13:30", "Lunch"), ("15:30", "16:00", "Standup")], 1),
     },
-    rooms=("R-ATLAS", "R-BIRCH", "R-CEDAR", "R-DUNE", "R-EMBER"),
+    rooms=_ALL_ROOMS,
     bookings=(
         _booking("BK-9201", "Quarterly review", "R-ATLAS", "09:30", "11:30", ["P-OPS"]),
         _booking("BK-9202", "Candidate interview", "R-BIRCH", "10:00", "12:00", ["P-OPS"]),
         _booking("BK-9203", "Ops sync", "R-EMBER", "11:00", "12:00", ["P-OPS"]),
         _booking("BK-9204", "Design crit", "R-EMBER", "08:00", "09:30", ["P-OPS"]),
+        _booking("BK-9601", "Compliance training", "R-HAVEN", "09:30", "11:30", ["P-UMA", "P-WES"]),
+        _booking("BK-9602", "Marketing stand-up", "R-LARK", "10:00", "10:30", ["P-NIA"]),
+        _booking("BK-9603", "Supplier audit", "R-MAPLE", "13:00", "15:00", ["P-KAI", "P-OWE"]),
+        *_FILLER,
     ),
     policy=None,
     attendees=("P-PRI", "P-TOM", "P-SVE"),
@@ -137,9 +224,9 @@ _S03 = Scenario(
         "P-ANA": _person("P-ANA", [("09:00", "09:30", "Standup"), ("12:00", "13:00", "Lunch"), ("14:30", "15:30", "Review")]),
         "P-BEN": _person("P-BEN", [("09:00", "09:30", "Standup"), ("12:00", "13:00", "Lunch"), ("14:30", "16:00", "Sprint planning")]),
         "P-CHL": _person("P-CHL", [("09:00", "09:30", "Standup"), ("12:00", "13:00", "Lunch"), ("14:30", "15:00", "1:1")]),
-        "P-DEV": _person("P-DEV", [("09:00", "09:30", "Standup"), ("12:00", "13:00", "Lunch"), ("14:30", "17:00", "On-call handover")]),
+        "P-DEV": _person("P-DEV", [("09:00", "09:30", "Standup"), ("12:00", "13:00", "Lunch"), ("14:30", "17:00", "On-call handover"), ("17:00", "17:30", "Commute")]),
     },
-    rooms=("R-ATLAS", "R-BIRCH", "R-CEDAR", "R-DUNE", "R-EMBER"),
+    rooms=_ALL_ROOMS,
     bookings=(
         _booking("BK-9301", "Ops sync", "R-BIRCH", "09:00", "10:15", ["P-OPS"]),
         _booking("BK-9302", "Finance sync", "R-BIRCH", "12:00", "13:00", ["P-OPS"]),
@@ -147,14 +234,26 @@ _S03 = Scenario(
         _booking("BK-9304", "Customer call", "R-DUNE", "14:00", "15:00", ["P-OPS"]),
         _booking("BK-9305", "Standup overflow", "R-CEDAR", "09:00", "10:00", ["P-OPS"]),
         _booking("BK-9306", "Board prep", "R-CEDAR", "14:00", "15:00", ["P-OPS"]),
+        _booking("BK-9611", "Analytics sync", "R-FERN", "09:00", "10:30", ["P-KAI", "P-OWE"]),
+        _booking("BK-9612", "Vendor lunch", "R-FERN", "12:30", "13:30", ["P-RAJ", "P-UMA"]),
+        _booking("BK-9613", "Pricing review", "R-LARK", "10:00", "11:00", ["P-MAX", "P-NIA", "P-WES"]),
+        _booking("BK-9614", "Content planning", "R-LARK", "13:30", "14:00", ["P-LIA"]),
+        _booking("BK-9615", "Supplier audit", "R-MAPLE", "11:00", "12:00", ["P-KAI"]),
+        *_FILLER,
     ),
     policy={
         "policy_id": "SP-2026-4",
+        "version": 2,
+        "effective_from": "2026-04-01",
         "rules": [
             "Rooms need a turnaround gap between bookings: a new booking may not start or end within the buffer of another booking in the same room.",
             "Attendees may be double-booked only by explicit exception, which this assistant cannot grant.",
         ],
         "room_buffer_minutes": 15,
+        "owner": "facilities",
+        "applies_to": ["North", "South"],
+        "last_reviewed_at": "2026-10-01",
+        "contact": "facilities@example.com",
     },
     attendees=("P-ANA", "P-BEN", "P-CHL", "P-DEV"),
     duration=90,
@@ -165,16 +264,23 @@ _S03 = Scenario(
 # 12:00-13:00 free. The ground-floor Nook is too small and the early slots are in upper-floor rooms.
 _S04 = Scenario(
     people={
-        "P-ANA": _person("P-ANA", [("14:30", "16:00", "Roadmap review")]),
-        "P-BEN": _person("P-BEN", [("09:00", "09:30", "Standup"), ("13:00", "13:30", "1:1")]),
+        "P-ANA": _person("P-ANA", [("08:30", "09:00", "Commute"), ("14:30", "16:00", "Roadmap review")]),
+        "P-BEN": _person("P-BEN", [("09:00", "09:30", "Standup"), ("13:00", "13:30", "1:1"), ("17:00", "17:30", "Commute")]),
     },
-    rooms=("R-ATLAS", "R-BIRCH", "R-CEDAR", "R-DUNE", "R-EMBER", "R-NOOK"),
+    rooms=_ALL_ROOMS,
     bookings=(
         _booking("BK-9401", "Support huddle", "R-EMBER", "09:30", "11:30", ["P-OPS"]),
         _booking("BK-9402", "Hiring panel", "R-EMBER", "14:30", "16:00", ["P-OPS"]),
+        _booking("BK-9621", "Partner onboarding", "R-MAPLE", "09:30", "12:00", ["P-OPS", "P-UMA"]),
+        _booking("BK-9622", "Visitor briefing", "R-MAPLE", "13:00", "14:30", ["P-KAI"]),
+        _booking("BK-9623", "Hiring debrief", "R-HAVEN", "11:00", "11:30", ["P-RAJ", "P-WES"]),
+        _booking("BK-9624", "Pricing review", "R-LARK", "10:00", "11:00", ["P-MAX", "P-NIA"]),
+        *_FILLER,
     ),
     policy={
         "policy_id": "SP-2026-5",
+        "version": 3,
+        "effective_from": "2026-06-01",
         "rules": [
             "Meetings with external guests must be held in a ground-floor room (floor 0).",
             "No meetings may overlap the midday blackout window.",
@@ -182,6 +288,10 @@ _S04 = Scenario(
         "blackout_start": "12:00",
         "blackout_end": "13:00",
         "external_floor": 0,
+        "owner": "facilities",
+        "applies_to": ["North", "South"],
+        "last_reviewed_at": "2026-10-01",
+        "contact": "facilities@example.com",
     },
     attendees=("P-ANA", "P-BEN"),
     duration=60,
@@ -197,14 +307,18 @@ _S05 = Scenario(
         "P-BEN": _person("P-BEN", [("09:00", "09:30", "Standup"), ("12:00", "13:00", "Lunch")]),
         "P-CHL": _person("P-CHL", [("09:00", "09:30", "Standup"), ("12:00", "13:00", "Lunch"), ("16:30", "17:00", "Handover")]),
         "P-DEV": _person("P-DEV", [("09:00", "09:30", "Standup"), ("12:00", "13:00", "Lunch")]),
-        "P-ELI": _person("P-ELI", [("10:00", "12:00", "Training"), ("12:00", "13:00", "Lunch")]),
+        "P-ELI": _person("P-ELI", [("08:00", "08:45", "Gym"), ("10:00", "12:00", "Training"), ("12:00", "13:00", "Lunch")]),
     },
-    rooms=("R-ATLAS", "R-BIRCH", "R-CEDAR", "R-DUNE", "R-EMBER"),
+    rooms=_ALL_ROOMS,
     bookings=(
         _booking("BK-7731", "Q4 planning", "R-BIRCH", "10:00", "11:30", ["P-ANA", "P-BEN", "P-CHL", "P-DEV"]),
         _booking("BK-9501", "Vendor demo", "R-DUNE", "13:00", "14:00", ["P-OPS"]),
         _booking("BK-9502", "Board prep", "R-CEDAR", "14:00", "15:00", ["P-OPS"]),
         _booking("BK-9503", "Town hall rehearsal", "R-CEDAR", "15:30", "17:00", ["P-OPS"]),
+        _booking("BK-9631", "Roadmap workshop", "R-LARK", "14:30", "16:30", ["P-OPS", "P-WES", "P-YAS"]),
+        _booking("BK-9632", "Retro", "R-FERN", "15:00", "16:00", ["P-NIA"]),
+        _booking("BK-9633", "Supplier audit", "R-MAPLE", "09:30", "11:00", ["P-KAI", "P-OWE"]),
+        *_FILLER,
     ),
     policy=None,
     attendees=("P-ANA", "P-BEN", "P-CHL", "P-DEV", "P-ELI"),
@@ -310,17 +424,20 @@ class SchedulingBackend:
         shift = (person["utc_offset_hours"] - HQ_UTC_OFFSET) * 60
         busy: list[dict[str, Any]] = []
         if date == DATE:
-            busy = [{"subject": b["subject"], "start": _ts(_m(b["start"])), "end": _ts(_m(b["end"]))}
-                    for b in person["busy"]]
+            busy = [{**b, "start": _ts(_m(b["start"])), "end": _ts(_m(b["end"]))} for b in person["busy"]]
             for b in self._active():
                 if person_id in b["attendee_ids"]:
-                    busy.append({"subject": b["subject"], "start": _ts(_from_ts(b["start"]) + shift),
-                                 "end": _ts(_from_ts(b["end"]) + shift)})
+                    organizer = _PEOPLE.get(b["organizer_id"], (b["organizer_id"],))[0]
+                    busy.append({"event_id": b["booking_id"], "subject": b["subject"], "organizer": organizer,
+                                 "start": _ts(_from_ts(b["start"]) + shift), "end": _ts(_from_ts(b["end"]) + shift),
+                                 "venue": _ROOMS[b["room_id"]]["name"], "show_as": "busy"})
             busy.sort(key=lambda b: b["start"])
         return {
-            "person_id": person_id, "name": person["name"], "date": date,
+            "person_id": person_id, "name": person["name"], "email": person["email"],
+            "department": person["department"], "date": date, "time_zone": person["time_zone"],
             "utc_offset_hours": person["utc_offset_hours"],
-            "work_start": person["work_start"], "work_end": person["work_end"], "busy": busy,
+            "work_start": person["work_start"], "work_end": person["work_end"],
+            "calendar_id": person["calendar_id"], "busy": busy,
         }
 
     def get_policy(self) -> dict[str, Any]:
@@ -357,8 +474,12 @@ class SchedulingBackend:
                 if pid in b["attendee_ids"] and _overlap(s, e, _from_ts(b["start"]), _from_ts(b["end"])):
                     raise ToolError(f"{pid} is already in a meeting from {b['start']} to {b['end']}.")
         self._next += 1
-        booking = {"booking_id": f"BK-{self._next}", "subject": subject, "room_id": room_id,
-                   "start": start, "end": end, "attendee_ids": list(attendee_ids), "status": "confirmed"}
+        booking_id = f"BK-{self._next}"
+        extras = _booking_extras(booking_id, attendee_ids[0] if attendee_ids else "P-OPS")
+        booking = {"booking_id": booking_id, "subject": subject, "organizer_id": extras["organizer_id"],
+                   "room_id": room_id, "start": start, "end": end, "attendee_ids": list(attendee_ids),
+                   "recurrence": "none", "cost_centre": extras["cost_centre"], "catering_order": "none",
+                   "created_at": "2026-11-02", "status": "confirmed"}
         self.bookings.append(booking)
         return copy.deepcopy(booking)
 
