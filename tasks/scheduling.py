@@ -342,6 +342,8 @@ class SchedulingBackend:
             raise ToolError(f"Times must look like '{DATE}T14:00' and fall on {DATE}.") from None
         if e <= s:
             raise ToolError("The meeting must end after it starts.")
+        if s % SLOT_MINUTES:
+            raise ToolError("Meetings must start on the hour or half hour.")
         for b in self._active():
             if b["room_id"] == room_id and _overlap(s, e, _from_ts(b["start"]), _from_ts(b["end"])):
                 raise ToolError(f"Room {room_id} is already booked from {b['start']} to {b['end']}.")
@@ -511,7 +513,7 @@ def _task(task_id: str, instruction: str, sc: Scenario, subject: str, tools: tup
     return Task(
         task_id=task_id,
         domain="scheduling",
-        instruction=instruction,
+        instruction=instruction + " Meetings start on the hour or half hour.",
         tools=tools,
         make_backend=partial(SchedulingBackend, sc),
         grade=partial(grade, sc),
