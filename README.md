@@ -78,6 +78,47 @@ the same guard tests cover them in every condition.
 python -m runner.run --models haiku --tasks hard --conditions baseline stacked --runs 3 --out results/hard.jsonl
 ```
 
+## Readout study (`readout/`)
+
+A like-for-like replication of the "readout" interface in arXiv 2610.37255 (Table 1 /
+Appendix F.2), where a trained Qwen3.5-2B fell from 85.0% to 19.2% when the observation's
+top-level JSON fields were reversed. It is a separate package; the tool-use runner and tasks
+above are untouched.
+
+Each decision the model gets a system message (task + harness rules) and a user message with a
+JSON observation: `instruction`, `page`, `decisions_remaining`, `controller`, `actions`. Every
+complete action maps one-to-one to a case-sensitive code (A–Z then a–z); the model replies
+with only the code, thinking off, default temperature, `max_tokens` 5, and the first
+non-whitespace character is parsed. An unparseable or illegal reply is a failure step that
+consumes a decision (`invalid_replies`). Reward is 1 for exact completion, 0 otherwise; at most
+10 decisions. Three MiniWoB++-style families, reimplemented as deterministic simulations with 40
+seeded instances each: `click-checkboxes`, `click-checkboxes-soft` (instruction uses a fixed
+synonym vocabulary, `readout/tasks.py`), and `ascending-numbers` (numbers hidden after the
+first click; the model must recall them from the first observation, which stays in the
+multi-turn history).
+
+Conditions, all presentation-only: `R0_canonical`, `R1_reversed_fields`, `R2_menu_list`,
+`R3_shifted_codes`, `R4_reversed_codes`, `R5_permuted_codes`. The system message and task
+information are identical across conditions.
+
+```
+python -m readout.run --models haiku --conditions all --runs 3 --out results/readout.jsonl [--dry-run]
+python -m readout.run --models qwen2b --runs 3 --out results/readout_qwen.jsonl   # local qwen3.5:2b-bf16 via Ollama
+python -m analysis.stats results/readout.jsonl                                     # baseline R0_canonical
+```
+
+Design choices:
+- **Multi-turn history.** The conversation is kept like a normal chat (observation = user turn,
+  reply = assistant turn), so the first observation of `ascending-numbers` stays visible.
+- **Thinking off.** Haiku 5.5 takes `thinking: disabled`; Sonnet 5.5 takes `between_tools`;
+  Opus 5.5 cannot turn thinking off and is refused by the CLI.
+- **Ollama backend** (`readout/ollama.py`, stdlib only): `think: false`, `stream: false`,
+  `temperature 1`, `num_predict 3`, system message first; `prompt_eval_count` / `eval_count`
+  are recorded as input / output tokens and the model costs zero in `analysis.cost`.
+- **Guard tests** (`tests/test_readout.py`): a scripted solver that picks actions by semantic
+  content succeeds on every instance under every condition; every condition's menu is a
+  bijection over the same actions as R0; every observation carries the same information as R0.
+
 ## Design decisions
 
 - **Guard tests** (`tests/test_perturb.py`). For every task and every condition:

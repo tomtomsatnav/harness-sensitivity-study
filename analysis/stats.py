@@ -22,6 +22,16 @@ from pydantic import BaseModel
 
 from runner.schemas import EpisodeResult
 
+# Condition names that serve as the baseline: the main study's and the readout study's.
+BASELINE_NAMES = ("baseline", "R0_canonical")
+
+
+def detect_baseline(results: list[EpisodeResult]) -> str:
+    present = [b for b in BASELINE_NAMES if any(r.condition == b for r in results)]
+    if len(present) != 1:
+        raise ValueError(f"expected exactly one baseline condition among {BASELINE_NAMES}, found {present}")
+    return present[0]
+
 
 def load_results(path: str | Path) -> list[EpisodeResult]:
     """Load episodes, dropping api_error ones (they are retried, not counted)."""
@@ -104,19 +114,21 @@ def cell_summary(results: list[EpisodeResult]) -> list[dict]:
     return rows
 
 
-def all_deltas(results: list[EpisodeResult], **kw) -> list[DeltaCI]:
-    pairs = sorted({(r.model, r.condition) for r in results if r.condition != "baseline"})
-    return [delta_ci(results, m, c, **kw) for m, c in pairs]
+def all_deltas(results: list[EpisodeResult], baseline: str | None = None, **kw) -> list[DeltaCI]:
+    baseline = baseline or detect_baseline(results)
+    pairs = sorted({(r.model, r.condition) for r in results if r.condition != baseline})
+    return [delta_ci(results, m, c, baseline=baseline, **kw) for m, c in pairs]
 
 
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("results")
     p.add_argument("--out", default=None, help="CSV of deltas (default: <results>.deltas.csv)")
+    p.add_argument("--baseline", default=None, help=f"baseline condition (default: whichever of {BASELINE_NAMES} is present)")
     args = p.parse_args(argv)
 
     results = load_results(args.results)
-    deltas = all_deltas(results)
+    deltas = all_deltas(results, baseline=args.baseline)
     out = Path(args.out or Path(args.results).with_suffix(".deltas.csv"))
     with out.open("w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=list(DeltaCI.model_fields))

@@ -22,6 +22,7 @@ PRICES = {
     "claude-haiku-5-5":  (0.10, 0.50, 0.01, 0.125),
     "claude-sonnet-5-5": (2.00, 10.00, 0.20, 2.50),
     "claude-opus-5-5":   (4.00, 20.00, 0.20, 5.00),
+    "qwen3.5:2b-bf16":   (0.00, 0.00, 0.00, 0.00),  # local Ollama model (readout study)
 }
 
 # Episodes per model in the full grid (spec: 25 tasks x 6 conditions x runs).
