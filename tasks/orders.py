@@ -109,7 +109,7 @@ _POLICY = {
     "policy_id": "RP-2026-3",
     "rules": [
         "Items that arrived damaged are refunded at the full order subtotal.",
-        "Shipping charges are refunded only for customers on the gold tier.",
+        "Shipping charges are refunded in addition to the subtotal for customers on the gold tier, and not otherwise.",
         "Refunds must be requested within 30 days of the delivery date.",
         "Refunds can only be issued for orders with status 'delivered'.",
     ],
@@ -523,9 +523,9 @@ class WindowBackend(OrdersBackend):
         "refund_window_days": 30,
         "store_credit_percent": 50,
         "rules": [
-            "Cash refunds must be requested within refund_window_days of the delivery date.",
+            "Cash refunds must be requested within the refund window (in days) set by this policy, counted from the delivery date.",
             "For damaged orders outside that window, no refund is issued; instead issue store credit "
-            "of store_credit_percent of the order subtotal, shipping excluded.",
+            "of the store-credit percentage set by this policy, applied to the order subtotal, shipping excluded.",
             "Store credit is issued with issue_store_credit and is final once issued.",
         ],
     }

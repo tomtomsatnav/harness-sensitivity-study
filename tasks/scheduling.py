@@ -655,15 +655,15 @@ TASKS = [
         "scheduling_02_three_time_zones",
         "Today is 2026-11-02. Book a 60-minute 'Cross-site sync' on 2026-11-03 for Priya Nair (P-PRI, New York), Tom Hale "
         "(P-TOM, London) and Sven Berg (P-SVE, Berlin). Meeting times are in headquarters time, which is New York "
-        "(UTC-5). All three must be free and inside their own local 09:00-17:00 working hours, and the room needs "
-        "video conferencing.",
+        "(UTC-5). All three must be free and inside their own local 09:00-17:00 working hours, and the room must "
+        "seat all three and have video conferencing.",
         _S02, "Cross-site sync", _BASE_TOOLS,
     ),
     _task(
         "scheduling_03_workshop_room_buffer",
         "Today is 2026-11-02. Book a 90-minute 'Process workshop' on 2026-11-03 for Ana Ruiz (P-ANA), Ben Okafor (P-BEN), "
-        "Chloe Marsh (P-CHL) and Dev Patel (P-DEV). All four must be free, the room must have a whiteboard and seat "
-        "four, and the booking must follow the room-booking policy. Use headquarters time.",
+        "Chloe Marsh (P-CHL) and Dev Patel (P-DEV). All four must be free within their working hours, the room must "
+        "have a whiteboard and seat four, and the booking must follow the room-booking policy. Use headquarters time.",
         _S03, "Process workshop", (*_BASE_TOOLS, GET_POLICY), use_policy=True,
     ),
     _task(
@@ -679,7 +679,7 @@ TASKS = [
         "Today is 2026-11-02. The 'Q4 planning' meeting on 2026-11-03 must now include Eli Novak (P-ELI) as well as its "
         "current attendees, and Eli cannot make the current time. Move the meeting the same day by cancelling the "
         "existing booking and booking a new one with the same 90-minute length and all five people. Everyone must be "
-        "free, the room must have a whiteboard and seat all five. Use headquarters time.",
+        "free within their working hours, the room must have a whiteboard and seat all five. Use headquarters time.",
         _S05, "Q4 planning", (*_BASE_TOOLS, CANCEL_BOOKING),
     ),
 ]

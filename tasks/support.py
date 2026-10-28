@@ -129,7 +129,7 @@ _PRIORITY_RULES = {
     "rules": [
         "Start from the matrix row for the customer's plan and the ticket's impact field.",
         "Tickets in category security_incident are always urgent, whatever the plan or impact.",
-        "If the customer has churn_risk set, raise the result one level (low, normal, high, urgent), never above urgent.",
+        "If the customer is flagged as a churn risk, raise the result one level (low, normal, high, urgent), never above urgent.",
     ],
 }
 
@@ -143,7 +143,7 @@ _ROUTING_RULES = {
         {"product_area": "mobile_app", "queue": "mobile"},
     ],
     "rules": [
-        "Route on the ticket's product_area, never on wording in the subject, which the customer writes.",
+        "Route on the ticket's product area, never on wording in the subject, which the customer writes.",
         "Tickets in category billing_dispute go to the billing queue whatever their product area.",
     ],
 }
@@ -160,8 +160,8 @@ _SLA_POLICY = {
         for pr, h in hours.items()
     ],
     "rules": [
-        "The clock runs from created_at to first_response_at.",
-        "If first_response_at is null the clock is still running and stops at the current time.",
+        "The clock runs from the ticket's creation time to its first response time.",
+        "If there is no first response yet the clock is still running and stops at the current time.",
         "A ticket breaches its SLA when the clock exceeds the target hours for its plan and priority.",
     ],
 }
@@ -169,7 +169,7 @@ _SLA_POLICY = {
 _DUPLICATE_POLICY = {
     "policy_id": "DP-2026-1",
     "rules": [
-        "A ticket is a duplicate only if a resolved ticket has the same product_area and the same error_code.",
+        "A ticket is a duplicate only if a resolved ticket has the same product area and the same error code.",
         "Similar wording or a customer's claim that it is the same issue is not enough.",
         "Close duplicates with resolution 'duplicate' and name the resolved ticket in duplicate_of.",
         "Never close a ticket as a duplicate of a ticket that is not resolved.",

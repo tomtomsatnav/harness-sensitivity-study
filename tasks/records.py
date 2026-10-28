@@ -138,8 +138,8 @@ _SCENARIOS["01"] = {
         "policy_id": "MP-2026-1",
         "rules": [
             "Two records are duplicates only if both the name and the date of birth match.",
-            "The survivor is the duplicate with the earlier created_at; the other duplicate is archived.",
-            "For each field, the value with the latest verified_at wins, whichever record holds it.",
+            "The survivor is the duplicate with the earlier creation date; the other duplicate is archived.",
+            "For each field, the value with the most recently verified value wins, whichever record holds it.",
             "Archive the losing record with merged_into set to the survivor's ID.",
         ],
     },
@@ -170,9 +170,9 @@ _SCENARIOS["02"] = {
     "policy": {
         "policy_id": "MP-2026-2",
         "rules": [
-            "For each field, the value from the highest-ranked source in source_precedence wins.",
+            "For each field, the value from the highest-ranked source in this policy's source ranking wins.",
             "A null value never wins; skip it and use the next-ranked source that has a value.",
-            "If the same source ranks first on both sides, the later verified_at wins.",
+            "If the same source ranks first on both sides, the more recently verified value wins.",
             "The survivor keeps its own record ID; archive the other record with merged_into set to the survivor.",
         ],
         "source_precedence": [
@@ -214,7 +214,7 @@ _SCENARIOS["03"] = {
         "policy_id": "MP-2026-3",
         "rules": [
             "Two records are duplicates only if both the name and the date of birth match.",
-            "The survivor is the duplicate with the later last_active_at, not the earlier created_at.",
+            "The survivor is the duplicate with the later last-active date, not the earlier creation date.",
             "The survivor keeps every value it already has; a field that is null on the survivor is filled "
             "from the other duplicate.",
             "Archive the other duplicate with merged_into set to the survivor's ID.",
@@ -280,8 +280,8 @@ _SCENARIOS["04"] = {
         "rules": [
             "For each field, a value whose most recent change was made by the customer beats a value "
             "whose most recent change was made by staff or an import, whatever the dates.",
-            "If both values or neither were last changed by the customer, the later changed_at wins.",
-            "Use the change history to see who made each field's most recent change; verified_at is not "
+            "If both values or neither were last changed by the customer, the later change date wins.",
+            "Use the change history to see who made each field's most recent change; the verification date is not "
             "a substitute.",
             "Merge into the survivor named in the request and archive the other record with merged_into "
             "set to the survivor.",
@@ -325,7 +325,7 @@ _SCENARIOS["05"] = {
             "Two records are duplicates only if both the name and the date of birth match.",
             "A record with an active subscription must be the survivor and can never be archived.",
             "The survivor's email is its login and is always kept.",
-            "For phone and address, the value with the later verified_at wins.",
+            "For phone and address, the value with the more recently verified value wins.",
             "For marketing_consent, if either duplicate is opted_out the merged record is opted_out.",
             "Archive the other duplicate with merged_into set to the survivor's ID.",
         ],
