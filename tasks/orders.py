@@ -4,18 +4,71 @@ from __future__ import annotations
 
 import copy
 import random
-from datetime import date
+from datetime import date, timedelta
 from typing import Any
 
 from tasks.base import CallFn, Grade, Task, ToolError, ToolSpec
 
 SEED = 1001
+TODAY = date(2026, 10, 20)
 
 _CUSTOMERS = [
     {"customer_id": "C-1042", "name": "Dana Whitfield", "email": "dana.w@example.com", "tier": "silver"},
     {"customer_id": "C-1187", "name": "Dana Whitley", "email": "dwhitley@example.com", "tier": "gold"},
     {"customer_id": "C-0931", "name": "Marcus Oyelaran", "email": "m.oyelaran@example.com", "tier": "bronze"},
 ]
+
+
+def _item(sku: str, description: str, quantity: int, unit_price: float) -> dict[str, Any]:
+    return {"sku": sku, "description": description, "quantity": quantity, "unit_price": unit_price}
+
+
+def _order_row(order_id: str, customer_id: str, placed: str, status: str, delivered: str | None,
+               shipping: float, items: list[dict[str, Any]]) -> dict[str, Any]:
+    return {"order_id": order_id, "customer_id": customer_id, "placed_at": placed, "status": status,
+            "delivered_at": delivered, "shipping": shipping, "items": items}
+
+
+# Catalogue the filler orders draw on. It deliberately contains no carafe, cutting board or duvet:
+# those are the products the task instructions name, so only hand-written orders carry them.
+_CATALOG = [
+    ("TEA-GRN-50", "Green tea, 50 bags", 18.25), ("TEA-EGY-40", "Earl Grey, 40 bags", 16.0),
+    ("MUG-STN-2", "Stoneware mugs (2)", 21.0), ("KTL-ELC-1", "Electric kettle", 129.99),
+    ("CER-BWL-4", "Ceramic bowl set (4)", 54.5), ("LIN-NAP-6", "Linen napkins (6)", 15.0),
+    ("TWL-TEA-3", "Tea towels (3)", 17.5), ("CND-SET-3", "Candle set", 11.5),
+    ("PLT-HRB-1", "Herb planter", 24.0), ("OIL-OLV-1", "Olive oil tin", 22.0),
+    ("WRP-BWX-3", "Beeswax wrap set", 14.0), ("SOC-WOL-3", "Wool socks (3 pairs)", 27.0),
+    ("PIL-LIN-2", "Pillowcase pair", 24.0), ("TRY-OAK-1", "Oak serving tray", 42.0),
+    ("JAR-GLS-6", "Glass storage jars (6)", 29.0), ("TUM-GLS-4", "Glass tumblers (4)", 19.5),
+    ("PCH-STN-1", "Stoneware pitcher", 34.0), ("APR-CAN-1", "Canvas apron", 26.0),
+    ("SPN-WDN-4", "Wooden spoons (4)", 12.75), ("BSK-WVN-1", "Woven storage basket", 31.0),
+    ("CST-IRN-1", "Cast-iron casserole", 89.0), ("GRT-BOX-1", "Box grater", 15.5),
+    ("SLT-CER-1", "Ceramic salt cellar", 13.0), ("PLC-COT-4", "Cotton placemats (4)", 18.0),
+    ("BLK-WOL-1", "Wool blanket", 74.0), ("CSH-VLV-2", "Velvet cushion covers (2)", 28.0),
+    ("DIF-REE-1", "Reed diffuser", 23.5), ("SCS-KIT-1", "Kitchen scissors", 11.0),
+]
+
+_FILLER_STATUSES = ("delivered",) * 6 + ("cancelled", "returned")
+
+
+def _extra_orders(customer_id: str, count: int, before: str, base_id: int, seed: int,
+                  statuses: tuple[str, ...] = _FILLER_STATUSES) -> list[dict[str, Any]]:
+    """Seeded filler orders for one customer, all placed strictly before `before`, oldest first."""
+    rng = random.Random(seed)
+    end = date.fromisoformat(before)
+    rows, next_id = [], base_id
+    for offset in sorted(rng.sample(range(10, 560), count), reverse=True):
+        placed = end - timedelta(days=offset)
+        status = rng.choice(statuses)
+        delivered = placed + timedelta(days=rng.randint(3, 7)) if status in ("delivered", "returned") else None
+        lines = [_item(sku, desc, rng.choice([1, 1, 1, 2, 2, 3]), price)
+                 for sku, desc, price in rng.sample(_CATALOG, rng.choice([1, 1, 2, 2, 3]))]
+        next_id += rng.randint(35, 400)
+        rows.append(_order_row(f"ORD-{next_id}", customer_id, placed.isoformat(), status,
+                               delivered.isoformat() if delivered else None,
+                               rng.choice([0.0, 4.99, 5.99, 7.99, 9.5]), lines))
+    return rows
+
 
 # Line items per order; subtotal, shipping and total are derived from these.
 _ORDERS = [
@@ -47,13 +100,16 @@ _ORDERS = [
         "status": "shipped", "delivered_at": None, "shipping": 0.0,
         "items": [{"sku": "CER-BWL-4", "description": "Ceramic bowl set (4)", "quantity": 1, "unit_price": 54.5}],
     },
+    # Filler: older orders for Dana Whitfield (all placed before ORD-61230) and for Dana Whitley.
+    *_extra_orders("C-1042", 20, "2026-10-06", 41000, 11),
+    *_extra_orders("C-1187", 6, "2026-10-08", 46000, 12),
 ]
 
 _POLICY = {
     "policy_id": "RP-2026-3",
     "rules": [
         "Items that arrived damaged are refunded at the full order subtotal.",
-        "Shipping charges are refunded only for customers on the gold tier.",
+        "Shipping charges are refunded in addition to the subtotal for customers on the gold tier, and not otherwise.",
         "Refunds must be requested within 30 days of the delivery date.",
         "Refunds can only be issued for orders with status 'delivered'.",
     ],
@@ -64,6 +120,140 @@ TARGET_ORDER = "ORD-61230"
 
 def _subtotal(order: dict[str, Any]) -> float:
     return round(sum(i["quantity"] * i["unit_price"] for i in order["items"]), 2)
+
+
+# ---------------------------------------------------------------------------
+# Presentation: realistic but irrelevant fields, derived deterministically from each entity's ID.
+
+_CHANNELS = ["web", "ios_app", "android_app", "phone"]
+_CARRIERS = ["UPS", "FedEx", "USPS", "DHL"]
+_PAYMENTS = ["card_visa", "card_mastercard", "card_amex", "paypal", "apple_pay"]
+_ADDRESSES = [
+    ("14 Beacon Street", "Boston", "MA"), ("880 Lake Shore Drive", "Chicago", "IL"),
+    ("2301 Elm Street", "Dallas", "TX"), ("45 Camelback Road", "Phoenix", "AZ"),
+    ("1900 Pike Place", "Seattle", "WA"), ("77 Peachtree Lane", "Atlanta", "GA"),
+]
+_NOTES = [None, None, "Prefers email contact.", "Asked about bulk pricing in March.",
+          "Delivery instructions: leave with concierge.", "Gift registry opened 2025."]
+
+
+def _rng(*parts: str) -> random.Random:
+    return random.Random("orders:" + ":".join(parts))
+
+
+def _stamp(d: date, rng: random.Random) -> str:
+    return f"{d.isoformat()}T{rng.randint(7, 20):02d}:{rng.randint(0, 59):02d}"
+
+
+def _customer_view(c: dict[str, Any]) -> dict[str, Any]:
+    rng = _rng("customer", c["customer_id"])
+    return {
+        "customer_id": c["customer_id"],
+        "name": c["name"],
+        "email": c["email"],
+        "phone": f"+1 {rng.choice([617, 312, 214, 602, 206])} 555 {rng.randint(100, 999)}{rng.randint(0, 9)}",
+        "tier": c["tier"],
+        "region": rng.choice(["us_northeast", "us_midwest", "us_south", "us_west"]),
+        "locale": "en-US",
+        "created_at": (TODAY - timedelta(days=rng.randint(200, 1500))).isoformat(),
+        "last_login_at": _stamp(TODAY - timedelta(days=rng.randint(0, 12)), rng),
+        "marketing_opt_in": rng.random() < 0.6,
+        "tags": rng.sample(["newsletter", "repeat_buyer", "gift_registry", "app_user", "wholesale_inquiry"],
+                           rng.randint(1, 3)),
+        "account_notes": rng.choice(_NOTES),
+    }
+
+
+def _order_extras(o: dict[str, Any]) -> dict[str, Any]:
+    rng = _rng("order", o["order_id"])
+    shipped = o["status"] != "cancelled"
+    last = date.fromisoformat(o["delivered_at"] or o["placed_at"]) + timedelta(days=0 if o["delivered_at"] else 1)
+    return {
+        "channel": rng.choice(_CHANNELS),
+        "carrier": rng.choice(_CARRIERS) if shipped else None,
+        "tracking_ref": f"TRK-{rng.randint(10**8, 10**9 - 1)}" if shipped else None,
+        "payment_method": rng.choice(_PAYMENTS),
+        "promo_code": rng.choice([None, None, None, "WELCOME10", "AUTUMN15", "FREESHIP"]),
+        "internal_ref": f"OMS-{rng.randint(100000, 999999)}",
+        "updated_at": _stamp(last, rng),
+    }
+
+
+def _address(customer_id: str) -> dict[str, Any]:
+    line, city, state = _rng("address", customer_id).choice(_ADDRESSES)
+    return {"line_one": line, "city": city, "region_code": state, "country": "US"}
+
+
+def _item_view(order_id: str, i: dict[str, Any]) -> dict[str, Any]:
+    rng = _rng("item", order_id, i["sku"])
+    return {
+        "sku": i["sku"],
+        "description": i["description"],
+        "quantity": i["quantity"],
+        "tax_code": rng.choice(["GEN", "HOME", "FOOD"]),
+        "unit_price": i["unit_price"],
+        "weight_kg": rng.choice([0.2, 0.35, 0.5, 0.8, 1.2, 1.9, 2.4]),
+        "fulfilled_from": rng.choice(["NJE", "DAL", "PHX", "CHI"]),
+        "gift_wrap": rng.random() < 0.15,
+    }
+
+
+def _order_summary(o: dict[str, Any]) -> dict[str, Any]:
+    x = _order_extras(o)
+    return {
+        "order_id": o["order_id"],
+        "placed_at": o["placed_at"],
+        "channel": x["channel"],
+        "status": o["status"],
+        "item_count": sum(i["quantity"] for i in o["items"]),
+        "item_summary": "; ".join(i["description"] for i in o["items"]),
+        "currency": "USD",
+        "total": round(_subtotal(o) + o["shipping"], 2),
+        "carrier": x["carrier"],
+        "updated_at": x["updated_at"],
+    }
+
+
+def _order_detail(o: dict[str, Any]) -> dict[str, Any]:
+    x = _order_extras(o)
+    subtotal = _subtotal(o)
+    return {
+        "order_id": o["order_id"],
+        "customer_id": o["customer_id"],
+        "placed_at": o["placed_at"],
+        "channel": x["channel"],
+        "status": o["status"],
+        "delivered_at": o["delivered_at"],
+        "carrier": x["carrier"],
+        "tracking_ref": x["tracking_ref"],
+        "payment_method": x["payment_method"],
+        "currency": "USD",
+        "shipping_address": _address(o["customer_id"]),
+        "billing_address": _address(o["customer_id"]),
+        "items": [_item_view(o["order_id"], i) for i in o["items"]],
+        "subtotal": subtotal,
+        "shipping": o["shipping"],
+        "total": round(subtotal + o["shipping"], 2),
+        "promo_code": x["promo_code"],
+        "internal_ref": x["internal_ref"],
+        "updated_at": x["updated_at"],
+    }
+
+
+def _policy_view(p: dict[str, Any]) -> dict[str, Any]:
+    rng = _rng("policy", p["policy_id"])
+    params = {k: v for k, v in p.items() if k not in ("policy_id", "rules")}
+    return {
+        "policy_id": p["policy_id"],
+        "version": rng.randint(2, 7),
+        "effective_from": f"2026-{rng.randint(1, 6):02d}-01",
+        "owner": "Customer Operations",
+        **params,
+        "rules": list(p["rules"]),
+        "jurisdiction": "US",
+        "last_reviewed_at": f"2026-{rng.randint(7, 9):02d}-{rng.randint(1, 28):02d}",
+        "policy_notes": "Refunds settle to the original payment method within five working days.",
+    }
 
 
 class OrdersBackend:
@@ -90,14 +280,14 @@ class OrdersBackend:
     def find_customer(self, email: str) -> dict[str, Any]:
         for c in self.customers:
             if c["email"].lower() == email.strip().lower():
-                return dict(c)
+                return _customer_view(c)
         raise ToolError(f"No customer with email {email!r}.")
 
     def search_customers(self, customer_name: str) -> dict[str, Any]:
         needle = customer_name.strip().lower()
         return {
             "query": customer_name,
-            "matches": [dict(c) for c in self.customers if needle and needle in c["name"].lower()],
+            "matches": [_customer_view(c) for c in self.customers if needle and needle in c["name"].lower()],
         }
 
     def list_orders(self, customer_id: str) -> dict[str, Any]:
@@ -105,35 +295,14 @@ class OrdersBackend:
             raise ToolError(f"No customer with ID {customer_id!r}.")
         return {
             "customer_id": customer_id,
-            "orders": [
-                {
-                    "order_id": o["order_id"],
-                    "placed_at": o["placed_at"],
-                    "status": o["status"],
-                    "total": round(_subtotal(o) + o["shipping"], 2),
-                }
-                for o in self.orders
-                if o["customer_id"] == customer_id
-            ],
+            "orders": [_order_summary(o) for o in self.orders if o["customer_id"] == customer_id],
         }
 
     def get_order(self, order_id: str) -> dict[str, Any]:
-        o = self._order(order_id)
-        subtotal = _subtotal(o)
-        return {
-            "order_id": o["order_id"],
-            "customer_id": o["customer_id"],
-            "placed_at": o["placed_at"],
-            "status": o["status"],
-            "delivered_at": o["delivered_at"],
-            "items": copy.deepcopy(o["items"]),
-            "subtotal": subtotal,
-            "shipping": o["shipping"],
-            "total": round(subtotal + o["shipping"], 2),
-        }
+        return _order_detail(self._order(order_id))
 
     def get_refund_policy(self) -> dict[str, Any]:
-        return copy.deepcopy(self.POLICY)
+        return _policy_view(self.POLICY)
 
     def issue_refund(self, order_id: str, amount: float, reason: str) -> dict[str, Any]:
         o = self._order(order_id)
@@ -151,7 +320,8 @@ class OrdersBackend:
             "status": "issued",
         }
         self.refunds.append(refund)
-        return dict(refund)
+        return {**refund, "currency": "USD", "settlement_method": "original_payment_method",
+                "issued_at": f"{TODAY.isoformat()}T10:{len(self.refunds):02d}"}
 
     def issue_store_credit(self, customer_id: str, order_id: str, amount: float) -> dict[str, Any]:
         o = self._order(order_id)
@@ -168,7 +338,7 @@ class OrdersBackend:
             "status": "issued",
         }
         self.store_credits.append(credit)
-        return dict(credit)
+        return {**credit, "currency": "USD", "issued_at": f"{TODAY.isoformat()}T10:{len(self.store_credits):02d}"}
 
     def snapshot(self) -> dict[str, Any]:
         return {"refunds": copy.deepcopy(self.refunds), "store_credits": copy.deepcopy(self.store_credits)}
@@ -212,8 +382,8 @@ TOOLS = (
     ),
     ToolSpec(
         name="list_orders",
-        description="List every order placed by a customer, with each order's ID, placement date, status and total.",
-        paraphrase="Return all orders a customer has placed, including each order's ID, date placed, status and total.",
+        description="List every order placed by a customer, with each order's ID, placement date, status, item summary and total.",
+        paraphrase="Return all orders a customer has placed, including each order's ID, date placed, status, item summary and total.",
         input_schema={
             "type": "object",
             "properties": {"customer_id": {"type": "string", "description": "The customer's ID."}},
@@ -276,16 +446,6 @@ TASKS = [
 
 # --- orders_02..05 ------------------------------------------------------------------------------
 
-def _item(sku: str, description: str, quantity: int, unit_price: float) -> dict[str, Any]:
-    return {"sku": sku, "description": description, "quantity": quantity, "unit_price": unit_price}
-
-
-def _order_row(order_id: str, customer_id: str, placed: str, status: str, delivered: str | None,
-               shipping: float, items: list[dict[str, Any]]) -> dict[str, Any]:
-    return {"order_id": order_id, "customer_id": customer_id, "placed_at": placed, "status": status,
-            "delivered_at": delivered, "shipping": shipping, "items": items}
-
-
 def _grade_one_refund(backend: OrdersBackend, order_id: str, amount: float, reason: str) -> Grade:
     if backend.store_credits:
         return Grade(success=False, detail="store credit issued, expected a refund")
@@ -316,6 +476,9 @@ class LostBackend(OrdersBackend):
                    [_item("PLT-HRB-1", "Herb planter", 1, 24.0)]),
         _order_row("ORD-70199", "C-2202", "2026-10-10", "lost_in_transit", None, 3.0,
                    [_item("KNF-CHF-1", "Chef's knife", 1, 55.0)]),
+        # Filler: every one of these arrived (or came back), so none can be the lost order.
+        *_extra_orders("C-2201", 19, "2026-09-28", 62000, 21, statuses=("delivered",) * 5 + ("returned",)),
+        *_extra_orders("C-2202", 5, "2026-10-10", 66000, 22, statuses=("delivered",) * 5 + ("returned",)),
     ]
     POLICY = {
         "policy_id": "RP-2026-4",
@@ -352,15 +515,17 @@ class WindowBackend(OrdersBackend):
                    [_item("CRF-GLS-1", "Glass carafe", 1, 36.0), _item("MUG-STN-4", "Stoneware mugs (4)", 1, 32.0)]),
         _order_row("ORD-71190", "C-2310", "2026-10-09", "delivered", "2026-10-14", 4.99,
                    [_item("TWL-TEA-3", "Tea towels (3)", 1, 17.5)]),
+        # Filler: no other order of hers contains a carafe (the catalogue has none).
+        *_extra_orders("C-2310", 20, "2026-10-09", 63000, 31),
     ]
     POLICY = {
         "policy_id": "RP-2026-5",
         "refund_window_days": 30,
         "store_credit_percent": 50,
         "rules": [
-            "Cash refunds must be requested within refund_window_days of the delivery date.",
+            "Cash refunds must be requested within the refund window (in days) set by this policy, counted from the delivery date.",
             "For damaged orders outside that window, no refund is issued; instead issue store credit "
-            "of store_credit_percent of the order subtotal, shipping excluded.",
+            "of the store-credit percentage set by this policy, applied to the order subtotal, shipping excluded.",
             "Store credit is issued with issue_store_credit and is final once issued.",
         ],
     }
@@ -382,17 +547,17 @@ def grade_window(backend: OrdersBackend) -> Grade:
 def reference_window(call: CallFn) -> None:
     customer = call("find_customer", email="noor.rahimi@example.com")
     orders = call("list_orders", customer_id=customer["customer_id"])["orders"]
-    details = [call("get_order", order_id=o["order_id"]) for o in orders]
-    order = next(d for d in details if any("carafe" in i["description"].lower() for i in d["items"]))
+    candidates = [o for o in orders if "carafe" in o["item_summary"].lower()]
+    order = call("get_order", order_id=candidates[0]["order_id"])
     policy = call("get_refund_policy")
-    age = (date(2026, 10, 20) - date.fromisoformat(order["delivered_at"])).days
+    age = (TODAY - date.fromisoformat(order["delivered_at"])).days
     if age <= policy["refund_window_days"]:
         raise AssertionError("order is inside the refund window")
     credit = round(order["subtotal"] * policy["store_credit_percent"] / 100, 2)
     call("issue_store_credit", customer_id=customer["customer_id"], order_id=order["order_id"], amount=credit)
 
 
-# orders_04: wrong_item on one line of an order; the same product is also in an older, out-of-window order.
+# orders_04: wrong_item on one line of an order; the same product is also in older, out-of-window orders.
 class WrongItemBackend(OrdersBackend):
     CUSTOMERS = [
         {"customer_id": "C-1187", "name": "Dana Whitley", "email": "dwhitley@example.com", "tier": "gold"},
@@ -405,6 +570,11 @@ class WrongItemBackend(OrdersBackend):
                    [_item("BRD-WLN-1", "Walnut cutting board", 2, 38.0), _item("OIL-OLV-1", "Olive oil tin", 1, 22.0)]),
         _order_row("ORD-72150", "C-1042", "2026-10-06", "delivered", "2026-10-11", 4.0,
                    [_item("BRD-WLN-1", "Walnut cutting board", 1, 38.0)]),
+        # A third cutting board order, delivered months before the window opened.
+        _order_row("ORD-68420", "C-1187", "2026-05-19", "delivered", "2026-05-24", 6.5,
+                   [_item("BRD-WLN-1", "Walnut cutting board", 1, 38.0), _item("APR-CAN-1", "Canvas apron", 1, 26.0)]),
+        *_extra_orders("C-1187", 18, "2026-10-04", 64000, 41),
+        *_extra_orders("C-1042", 5, "2026-10-06", 67000, 42),
     ]
     POLICY = {
         "policy_id": "RP-2026-6",
@@ -424,8 +594,9 @@ def grade_wrong_item(backend: OrdersBackend) -> Grade:
 def reference_wrong_item(call: CallFn) -> None:
     customer = call("find_customer", email="dwhitley@example.com")
     orders = call("list_orders", customer_id=customer["customer_id"])["orders"]
-    details = [call("get_order", order_id=o["order_id"]) for o in orders]
-    recent = [d for d in details if (date(2026, 10, 20) - date.fromisoformat(d["delivered_at"])).days <= 30]
+    candidates = [o for o in orders if "cutting board" in o["item_summary"].lower()]
+    details = [call("get_order", order_id=o["order_id"]) for o in candidates]
+    recent = [d for d in details if d["delivered_at"] and (TODAY - date.fromisoformat(d["delivered_at"])).days <= 30]
     order = next(d for d in recent if any("cutting board" in i["description"].lower() for i in d["items"]))
     call("get_refund_policy")
     line = next(i for i in order["items"] if "cutting board" in i["description"].lower())
@@ -440,6 +611,11 @@ class SimilarNamesBackend(OrdersBackend):
         {"customer_id": "C-3302", "name": "Priya Nair", "email": "p.nair@fernhill.example", "tier": "gold"},
         {"customer_id": "C-3303", "name": "Priya Nayar", "email": "priya.nayar@fernhill.example", "tier": "gold"},
         {"customer_id": "C-3304", "name": "Priyanka Nair", "email": "pnair@fernhill.example", "tier": "bronze"},
+        {"customer_id": "C-3305", "name": "Priya Nair", "email": "priya.nair@example.net", "tier": "bronze"},
+        {"customer_id": "C-3306", "name": "Priya Nair", "email": "priya.nair@fernhillpress.example", "tier": "silver"},
+        {"customer_id": "C-3307", "name": "Supriya Nair", "email": "supriya.nair@example.com", "tier": "bronze"},
+        {"customer_id": "C-3308", "name": "Anil Nair", "email": "anil.nair@fernhill.example", "tier": "silver"},
+        {"customer_id": "C-3309", "name": "Priya Natarajan", "email": "priya.n@example.org", "tier": "gold"},
     ]
     ORDERS = [
         _order_row("ORD-73010", "C-3301", "2026-10-06", "delivered", "2026-10-12", 5.0,
@@ -452,6 +628,14 @@ class SimilarNamesBackend(OrdersBackend):
                    [_item("DUV-LIN-1", "Linen duvet cover", 1, 79.0)]),
         _order_row("ORD-73090", "C-3304", "2026-10-07", "delivered", "2026-10-13", 5.5,
                    [_item("DUV-LIN-1", "Linen duvet cover", 1, 79.0)]),
+        _order_row("ORD-73120", "C-3305", "2026-10-09", "delivered", "2026-10-14", 5.0,
+                   [_item("DUV-LIN-1", "Linen duvet cover", 1, 79.0)]),
+        _order_row("ORD-73133", "C-3306", "2026-10-08", "delivered", "2026-10-13", 5.5,
+                   [_item("DUV-LIN-1", "Linen duvet cover", 1, 79.0), _item("PIL-LIN-2", "Pillowcase pair", 2, 24.0)]),
+        # Filler: the right Priya's other orders, none containing a duvet.
+        *_extra_orders("C-3302", 20, "2026-10-03", 65000, 51),
+        *_extra_orders("C-3301", 4, "2026-10-06", 68000, 52),
+        *_extra_orders("C-3306", 4, "2026-10-08", 68500, 53),
     ]
 
 
@@ -463,8 +647,8 @@ def reference_similar(call: CallFn) -> None:
     matches = call("search_customers", customer_name="Priya Nair")["matches"]
     customer = next(c for c in matches if c["name"] == "Priya Nair" and c["email"].endswith("@fernhill.example"))
     orders = call("list_orders", customer_id=customer["customer_id"])["orders"]
-    details = [call("get_order", order_id=o["order_id"]) for o in orders]
-    order = next(d for d in details if any("duvet" in i["description"].lower() for i in d["items"]))
+    candidates = [o for o in orders if "duvet" in o["item_summary"].lower()]
+    order = call("get_order", order_id=candidates[0]["order_id"])
     call("get_refund_policy")
     amount = order["subtotal"] + (order["shipping"] if customer["tier"] == "gold" else 0.0)
     call("issue_refund", order_id=order["order_id"], amount=round(amount, 2), reason="damaged")

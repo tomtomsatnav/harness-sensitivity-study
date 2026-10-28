@@ -20,12 +20,97 @@ FieldRow = tuple[str, Any, Any, Any]
 
 
 def _rec(rid: str, name: str, dob: str, created: str, updated: str, active: str, sub: str,
-         fields: list[FieldRow]) -> dict[str, Any]:
+         fields: list[FieldRow], status: str = "active", merged_into: str | None = None) -> dict[str, Any]:
     return {
-        "record_id": rid, "name": name, "date_of_birth": dob, "status": "active", "merged_into": None,
+        "record_id": rid, "name": name, "date_of_birth": dob, "status": status, "merged_into": merged_into,
         "created_at": created, "updated_at": updated, "last_active_at": active, "subscription_status": sub,
         "fields": {f: {"value": v, "verified_at": ver, "source": src} for f, v, ver, src in fields},
     }
+
+
+# --- filler: CRM metadata that no merge rule refers to, and look-alike records ------------------------
+# Everything here is derived from fixed seeds, so every run sees the same data.
+
+_REGIONS = ["emea_north", "emea_south", "emea_central", "amer_east", "apac_west"]
+_LOCALES = ["en_GB", "de_DE", "en_NG", "it_IT", "en_US"]
+_CREATORS = ["import_job", "web_signup", "agent:kboyle", "agent:mreyes", "agent:dnkemelu"]
+_SYSTEMS = ["salesforce", "hubspot", "legacy_crm", "shopify", "zendesk"]
+_OWNERS = ["k.boyle", "m.reyes", "d.nkemelu", "s.oduya", "unassigned"]
+_TAGS = ["newsletter", "vip", "gdpr_request", "trade_show_2025", "wholesale", "returning", "price_sensitive"]
+_NOTES = [
+    "Prefers email contact.", "Asked for invoice copies in March.", "Do not call before 10:00.",
+    "Bounced email on last campaign.", "Opened a support case about delivery.", "No notes.",
+    "Requested a paper statement.", "Attended the 2025 trade show.",
+]
+_STREETS = ["Station Road", "Mill Lane", "Church Street", "Park Avenue", "Harbour View", "Orchard Close",
+            "Victoria Terrace", "Kingsway", "Bridge Street", "Elm Grove"]
+_DOMAINS = ["example.com", "example.org", "example.net", "mail.example"]
+_SOURCES = ["web_form", "support_desk", "crm", "billing", "import", "checkout", "shipping"]
+
+
+def _decorate(record: dict[str, Any]) -> dict[str, Any]:
+    """Attach the metadata columns every record carries. Deterministic in the record ID."""
+    rng = random.Random(f"{SEED}:{record['record_id']}")
+    record["internal_ref"] = f"{rng.choice(['SF', 'HS', 'LG'])}-{rng.randint(10000, 99999)}"
+    record["region"] = rng.choice(_REGIONS)
+    record["locale"] = rng.choice(_LOCALES)
+    record["created_by"] = rng.choice(_CREATORS)
+    record["source_system"] = rng.choice(_SYSTEMS)
+    record["account_owner"] = rng.choice(_OWNERS)
+    record["tags"] = sorted(rng.sample(_TAGS, rng.randint(0, 3)))
+    record["notes"] = rng.choice(_NOTES)
+    return record
+
+
+def _date(rng: random.Random, lo: int, hi: int) -> str:
+    return f"{rng.randint(lo, hi)}-{rng.randint(1, 12):02d}-{rng.randint(1, 28):02d}"
+
+
+def _distractors(key: str, prefix: str, numbers: list[int], variants: list[tuple[str, int]],
+                 taken: set[tuple[str, str]], city_pool: list[str], phone_prefix: str,
+                 with_consent: bool = False) -> list[dict[str, Any]]:
+    """Look-alike records: same or similar names with other dates of birth, some already archived.
+
+    `taken` holds the (name, date of birth) pairs of the scenario's own records; no distractor ever
+    reuses one, so the merge rules match exactly the pair the task is about.
+    """
+    rng = random.Random(SEED * 10 + int(key))
+    ids = iter(rng.sample(numbers, len(numbers)))
+    seen = set(taken)
+    out: list[dict[str, Any]] = []
+    for name, count in variants:
+        for _ in range(count):
+            while True:
+                dob = _date(rng, 1958, 2004)
+                if (name, dob) not in seen:
+                    break
+            seen.add((name, dob))
+            created = _date(rng, 2019, 2024)
+            updated = _date(rng, 2025, 2026)
+            active = _date(rng, 2025, 2026)
+            first, last = name.split(" ", 1)
+            handle = f"{first.lower()}.{last.lower().replace(' ', '').replace('-', '')}{rng.randint(1, 99)}"
+            fields: list[FieldRow] = [
+                ("email", f"{handle}@{rng.choice(_DOMAINS)}", _date(rng, 2024, 2026), rng.choice(_SOURCES)),
+                ("phone", f"{phone_prefix}{rng.randint(10000, 99999)}", _date(rng, 2024, 2026), rng.choice(_SOURCES)),
+                ("address", f"{rng.randint(1, 120)} {rng.choice(_STREETS)}, {rng.choice(city_pool)}",
+                 _date(rng, 2024, 2026), rng.choice(_SOURCES)),
+            ]
+            if with_consent:
+                fields.append(("marketing_consent", rng.choice(["opted_in", "opted_out"]), _date(rng, 2024, 2026),
+                               rng.choice(_SOURCES)))
+            # Exact-name look-alikes never hold an active subscription, so that rule reads cleanly.
+            sub = "none" if name == variants[0][0] else rng.choice(["none", "none", "lapsed", "active"])
+            rid = f"{prefix}{next(ids)}"
+            out.append(_rec(rid, name, dob, created, updated, active, sub, fields))
+    # Two look-alikes were themselves merged earlier: an archived twin pointing at the active record.
+    for twin_of in rng.sample(out[:variants[0][1]], 2):
+        rid = f"{prefix}{next(ids)}"
+        fields = [(f, e["value"], e["verified_at"], e["source"]) for f, e in twin_of["fields"].items()]
+        out.append(_rec(rid, twin_of["name"], twin_of["date_of_birth"], _date(rng, 2019, 2022),
+                        twin_of["created_at"], twin_of["created_at"], "none", fields,
+                        status="archived", merged_into=twin_of["record_id"]))
+    return out
 
 
 _SCENARIOS: dict[str, dict[str, Any]] = {}
@@ -53,13 +138,19 @@ _SCENARIOS["01"] = {
         "policy_id": "MP-2026-1",
         "rules": [
             "Two records are duplicates only if both the name and the date of birth match.",
-            "The survivor is the duplicate with the earlier created_at; the other duplicate is archived.",
-            "For each field, the value with the latest verified_at wins, whichever record holds it.",
+            "The survivor is the duplicate with the earlier creation date; the other duplicate is archived.",
+            "For each field, the value with the most recently verified value wins, whichever record holds it.",
             "Archive the losing record with merged_into set to the survivor's ID.",
         ],
     },
     "survivor": "CRM-2001", "loser": "CRM-2044",
     "changes": {"email": "priya.r.raman@example.org", "address": "9 Kestrel Court, York"},
+    "distractors": _distractors(
+        "01", "CRM-", list(range(2050, 2300)),
+        [("Priya Raman", 9), ("Priya Ramanathan", 3), ("Priya Ramanan", 2), ("Priya Ramani", 2),
+         ("Supriya Raman", 2), ("Priya Raman-Iyer", 1), ("Priya Ramanujan", 1)],
+        {("Priya Raman", "1989-03-14"), ("Priya Ramanathan", "1991-11-02")},
+        ["Leeds", "York", "Hull", "Sheffield", "Bradford", "Harrogate"], "+44 7700 9"),
 }
 
 # --- 02: per-field source-of-truth ranking; null values never win -----------------------------------
@@ -79,9 +170,9 @@ _SCENARIOS["02"] = {
     "policy": {
         "policy_id": "MP-2026-2",
         "rules": [
-            "For each field, the value from the highest-ranked source in source_precedence wins.",
+            "For each field, the value from the highest-ranked source in this policy's source ranking wins.",
             "A null value never wins; skip it and use the next-ranked source that has a value.",
-            "If the same source ranks first on both sides, the later verified_at wins.",
+            "If the same source ranks first on both sides, the more recently verified value wins.",
             "The survivor keeps its own record ID; archive the other record with merged_into set to the survivor.",
         ],
         "source_precedence": [
@@ -92,6 +183,12 @@ _SCENARIOS["02"] = {
     },
     "survivor": "CUS-4410", "loser": "CUS-4472",
     "changes": {"email": "tomas.becker@example.org", "address": "Karl-Marx-Allee 90, Berlin"},
+    "distractors": _distractors(
+        "02", "CUS-", [n for n in range(4400, 4500) if n not in (4410, 4472)],
+        [("Tomas Becker", 7), ("Thomas Becker", 4), ("Anna Becker", 2), ("Jonas Becker", 2), ("Lena Becker", 2),
+         ("Tomas Beckert", 1), ("Tom Becker", 1)],
+        {("Tomas Becker", "1985-09-30")},
+        ["Berlin", "Hamburg", "Potsdam", "Leipzig", "Dresden"], "+49 30 5550 "),
 }
 
 # --- 03: same-name decoy; survivor is the most recently active duplicate; nulls are filled ----------
@@ -117,7 +214,7 @@ _SCENARIOS["03"] = {
         "policy_id": "MP-2026-3",
         "rules": [
             "Two records are duplicates only if both the name and the date of birth match.",
-            "The survivor is the duplicate with the later last_active_at, not the earlier created_at.",
+            "The survivor is the duplicate with the later last-active date, not the earlier creation date.",
             "The survivor keeps every value it already has; a field that is null on the survivor is filled "
             "from the other duplicate.",
             "Archive the other duplicate with merged_into set to the survivor's ID.",
@@ -125,6 +222,12 @@ _SCENARIOS["03"] = {
     },
     "survivor": "LEE-377", "loser": "LEE-301",
     "changes": {"address": "55 Dock Street, Bristol"},
+    "distractors": _distractors(
+        "03", "LEE-", [n for n in range(300, 400) if n not in (301, 352, 377)],
+        [("Jordan Lee", 9), ("Jordan Lee-Walker", 2), ("Jordan Leech", 2), ("Jordan Lees", 2), ("Jordan Leeds", 1),
+         ("Jordan Leeson", 1), ("Jordan Leeming", 1)],
+        {("Jordan Lee", "1994-07-21"), ("Jordan Lee", "1988-12-05")},
+        ["Bristol", "Bath", "Cardiff", "Exeter", "Swindon"], "+44 7700 9"),
 }
 
 # --- 04: customer-entered values beat staff or import values; needs the change history ---------------
@@ -141,18 +244,34 @@ _SCENARIOS["04"] = {
             ("address", "21 Awolowo Road, Ikoyi, Lagos", "2026-06-17", "import"),
         ]),
     ],
+    # Only each field's most recent change decides the merge; the older rows are the record's ordinary
+    # audit trail and never outrank it.
     "history": {
         "CUS-7120": [
+            {"field": "email", "value": "amara.okafor@legacy.example", "changed_at": "2021-08-08", "changed_by": "import"},
+            {"field": "email", "value": "aokafor@example.com", "changed_at": "2022-06-14", "changed_by": "staff"},
+            {"field": "email", "value": "amara.ok@example.com", "changed_at": "2023-03-30", "changed_by": "customer"},
             {"field": "email", "value": "a.okafor@example.org", "changed_at": "2024-02-10", "changed_by": "staff"},
             {"field": "email", "value": "amara.okafor@example.com", "changed_at": "2026-01-12", "changed_by": "customer"},
+            {"field": "phone", "value": "+234 803 555 0007", "changed_at": "2021-08-08", "changed_by": "import"},
+            {"field": "phone", "value": "+234 803 555 0088", "changed_at": "2022-09-19", "changed_by": "staff"},
             {"field": "phone", "value": "+234 803 555 0100", "changed_at": "2024-05-21", "changed_by": "customer"},
+            {"field": "phone", "value": "+234 803 555 0120", "changed_at": "2025-07-02", "changed_by": "staff"},
             {"field": "phone", "value": "+234 803 555 0142", "changed_at": "2026-09-30", "changed_by": "staff"},
+            {"field": "address", "value": "3 Broad Street, Lagos", "changed_at": "2021-08-08", "changed_by": "import"},
+            {"field": "address", "value": "12 Adeola Odeku Street, Lagos", "changed_at": "2022-11-05", "changed_by": "customer"},
+            {"field": "address", "value": "12 Adeola Odeku St, Victoria Island, Lagos", "changed_at": "2024-08-14", "changed_by": "staff"},
             {"field": "address", "value": "7 Marina Close, Lagos", "changed_at": "2025-12-01", "changed_by": "import"},
         ],
         "CUS-7185": [
+            {"field": "email", "value": "amara.okafor92@example.net", "changed_at": "2025-05-05", "changed_by": "import"},
+            {"field": "email", "value": "amara.o92@example.net", "changed_at": "2025-09-18", "changed_by": "customer"},
             {"field": "email", "value": "amara.o@example.net", "changed_at": "2026-08-20", "changed_by": "staff"},
             {"field": "phone", "value": "+234 803 555 0101", "changed_at": "2023-11-02", "changed_by": "import"},
+            {"field": "phone", "value": "+234 803 555 0150", "changed_at": "2025-06-30", "changed_by": "staff"},
             {"field": "phone", "value": "+234 803 555 0199", "changed_at": "2026-03-05", "changed_by": "customer"},
+            {"field": "address", "value": "5 Kofo Abayomi Street, Lagos", "changed_at": "2025-05-05", "changed_by": "import"},
+            {"field": "address", "value": "5 Kofo Abayomi St, Victoria Island, Lagos", "changed_at": "2025-10-22", "changed_by": "staff"},
             {"field": "address", "value": "21 Awolowo Road, Ikoyi, Lagos", "changed_at": "2026-06-17", "changed_by": "import"},
         ],
     },
@@ -161,8 +280,8 @@ _SCENARIOS["04"] = {
         "rules": [
             "For each field, a value whose most recent change was made by the customer beats a value "
             "whose most recent change was made by staff or an import, whatever the dates.",
-            "If both values or neither were last changed by the customer, the later changed_at wins.",
-            "Use the change history to see who made each field's most recent change; verified_at is not "
+            "If both values or neither were last changed by the customer, the later change date wins.",
+            "Use the change history to see who made each field's most recent change; the verification date is not "
             "a substitute.",
             "Merge into the survivor named in the request and archive the other record with merged_into "
             "set to the survivor.",
@@ -170,6 +289,12 @@ _SCENARIOS["04"] = {
     },
     "survivor": "CUS-7120", "loser": "CUS-7185",
     "changes": {"phone": "+234 803 555 0199", "address": "21 Awolowo Road, Ikoyi, Lagos"},
+    "distractors": _distractors(
+        "04", "CUS-", [n for n in range(7100, 7200) if n not in (7120, 7185)],
+        [("Amara Okafor", 7), ("Amaka Okafor", 2), ("Chidi Okafor", 2), ("Ngozi Okafor", 2), ("Emeka Okafor", 2),
+         ("Amara Okafor-Eze", 1), ("Amarachi Okafor", 1)],
+        {("Amara Okafor", "1992-04-18")},
+        ["Lagos", "Abuja", "Ibadan", "Enugu", "Port Harcourt"], "+234 803 555 "),
 }
 
 # --- 05: active subscription pins the survivor; opt-out is sticky ---------------------------------------
@@ -200,23 +325,49 @@ _SCENARIOS["05"] = {
             "Two records are duplicates only if both the name and the date of birth match.",
             "A record with an active subscription must be the survivor and can never be archived.",
             "The survivor's email is its login and is always kept.",
-            "For phone and address, the value with the later verified_at wins.",
+            "For phone and address, the value with the more recently verified value wins.",
             "For marketing_consent, if either duplicate is opted_out the merged record is opted_out.",
             "Archive the other duplicate with merged_into set to the survivor's ID.",
         ],
     },
     "survivor": "MAR-188", "loser": "MAR-100",
     "changes": {"phone": "+39 333 555 0101", "marketing_consent": "opted_out"},
+    "distractors": _distractors(
+        "05", "MAR-", [n for n in range(101, 300) if n not in (188, 205)],
+        [("Elena Marchetti", 8), ("Marco Marchetti", 2), ("Giulia Marchetti", 2), ("Luca Marchetti", 2),
+         ("Andrea Marchetti", 2), ("Elena Marchetti-Rossi", 1), ("Elena Marchettini", 1)],
+        {("Elena Marchetti", "1990-05-09"), ("Elena Marchetti", "1996-02-17")},
+        ["Torino", "Milano", "Genova", "Bologna", "Verona"], "+39 333 555 ", with_consent=True),
 }
+
+
+_POLICY_META = {
+    "version": 4, "effective_from": "2026-01-01", "owner": "data_governance", "last_reviewed_at": "2026-09-15",
+    "applies_to": ["customer_records", "lead_records"],
+    "notes": "Exceptions need written approval from the data-governance owner.",
+}
+
+_CHANNELS = {"customer": ["web_portal", "mobile_app"], "staff": ["agent_console", "phone_call"], "import": ["batch_import"]}
+
+
+def _policy_with_meta(policy: dict[str, Any]) -> dict[str, Any]:
+    """The policy as the tool returns it: identifier and rules first, housekeeping mixed in after."""
+    out = {"policy_id": policy["policy_id"], "version": _POLICY_META["version"],
+           "effective_from": _POLICY_META["effective_from"], "rules": policy["rules"]}
+    if "source_precedence" in policy:
+        out["source_precedence"] = policy["source_precedence"]
+    out.update({k: _POLICY_META[k] for k in ("owner", "applies_to", "last_reviewed_at", "notes")})
+    return out
 
 
 class RecordsBackend:
     def __init__(self, key: str) -> None:
         self.key = key
         scenario = _SCENARIOS[key]
-        self.records: list[dict[str, Any]] = copy.deepcopy(scenario["records"])
+        self.records: list[dict[str, Any]] = [
+            _decorate(r) for r in copy.deepcopy(scenario["records"] + scenario["distractors"])]
         random.Random(SEED + int(key)).shuffle(self.records)
-        self.policy = copy.deepcopy(scenario["policy"])
+        self.policy = _policy_with_meta(copy.deepcopy(scenario["policy"]))
         self.history = copy.deepcopy(scenario.get("history", {}))
 
     def _record(self, record_id: str) -> dict[str, Any]:
@@ -232,16 +383,26 @@ class RecordsBackend:
         hits = []
         for r in self.records:
             email = r["fields"].get("email", {}).get("value") or ""
+            address = r["fields"].get("address", {}).get("value")
             if q in r["name"].lower() or q in email.lower():
-                hits.append({"record_id": r["record_id"], "name": r["name"], "status": r["status"],
-                             "created_at": r["created_at"]})
+                hits.append({
+                    "record_id": r["record_id"], "name": r["name"], "date_of_birth": r["date_of_birth"],
+                    "email": email or None, "city": address.rsplit(", ", 1)[-1] if address else None,
+                    "status": r["status"], "region": r["region"], "created_at": r["created_at"],
+                    "last_active_at": r["last_active_at"], "source_system": r["source_system"],
+                    "internal_ref": r["internal_ref"],
+                })
         return {"query": query, "matches": hits}
 
     def get_record(self, record_id: str) -> dict[str, Any]:
         r = self._record(record_id)
-        out = {k: r[k] for k in ("record_id", "name", "date_of_birth", "status", "merged_into", "created_at",
-                                 "updated_at", "last_active_at", "subscription_status")}
-        out["fields"] = [{"field": f, **copy.deepcopy(e)} for f, e in r["fields"].items()]
+        out = {k: r[k] for k in (
+            "record_id", "internal_ref", "name", "date_of_birth", "status", "merged_into", "region", "locale",
+            "created_at", "created_by", "updated_at", "last_active_at", "source_system", "subscription_status",
+            "account_owner", "tags", "notes")}
+        out["fields"] = [{"field": f, "entry_id": f"{record_id}-{f.upper()}", "value": e["value"],
+                          "verified_at": e["verified_at"], "source": e["source"], "last_synced_at": r["updated_at"]}
+                         for f, e in r["fields"].items()]
         return out
 
     def get_merge_policy(self) -> dict[str, Any]:
@@ -249,8 +410,17 @@ class RecordsBackend:
 
     def get_field_history(self, record_id: str) -> dict[str, Any]:
         self._record(record_id)
-        changes = sorted(self.history.get(record_id, []), key=lambda c: c["changed_at"])
-        return {"record_id": record_id, "changes": copy.deepcopy(changes)}
+        changes = sorted(self.history.get(record_id, []), key=lambda c: (c["changed_at"], c["field"]))
+        previous: dict[str, Any] = {}
+        rows = []
+        for i, c in enumerate(changes, 1):
+            rng = random.Random(f"{record_id}:{c['field']}:{c['changed_at']}")
+            rows.append({"change_id": f"CH-{record_id[-4:]}-{i:02d}", "field": c["field"],
+                         "previous_value": previous.get(c["field"]), "value": c["value"],
+                         "changed_at": c["changed_at"], "changed_by": c["changed_by"],
+                         "channel": rng.choice(_CHANNELS[c["changed_by"]])})
+            previous[c["field"]] = c["value"]
+        return {"record_id": record_id, "changes": rows}
 
     def update_record(self, record_id: str, field: str, value: str) -> dict[str, Any]:
         r = self._record(record_id)
@@ -329,11 +499,16 @@ def _apply(call: CallFn, survivor: dict[str, Any], other: dict[str, Any], winner
     call("archive_record", record_id=other["record_id"], merged_into=survivor["record_id"])
 
 
+def _candidates(call: CallFn, query: str, name: str, dob: str) -> list[dict[str, Any]]:
+    """Fetch the active records whose search summary matches the name and date of birth exactly."""
+    matches = call("search_records", query=query)["matches"]
+    return [call("get_record", record_id=m["record_id"]) for m in matches
+            if m["name"] == name and m["date_of_birth"] == dob and m["status"] == "active"]
+
+
 def reference_01(call: CallFn) -> None:
-    matches = call("search_records", query="Priya Raman")["matches"]
-    records = [call("get_record", record_id=m["record_id"]) for m in matches]
+    dups = _candidates(call, "Priya Raman", "Priya Raman", "1989-03-14")
     call("get_merge_policy")
-    dups = [r for r in records if r["date_of_birth"] == "1989-03-14" and r["status"] == "active"]
     survivor, other = sorted(dups, key=lambda r: r["created_at"])
     a, b = _by_field(survivor), _by_field(other)
     winners = {f: max((a[f], b[f]), key=lambda e: e["verified_at"])["value"] for f in a}
@@ -341,6 +516,7 @@ def reference_01(call: CallFn) -> None:
 
 
 def reference_02(call: CallFn) -> None:
+    call("search_records", query="Becker")
     policy = call("get_merge_policy")
     ranking = {e["field"]: e["sources"] for e in policy["source_precedence"]}
     survivor = call("get_record", record_id="CUS-4410")
@@ -356,10 +532,8 @@ def reference_02(call: CallFn) -> None:
 
 
 def reference_03(call: CallFn) -> None:
-    matches = call("search_records", query="Jordan Lee")["matches"]
-    records = [call("get_record", record_id=m["record_id"]) for m in matches]
+    dups = _candidates(call, "Jordan Lee", "Jordan Lee", "1994-07-21")
     call("get_merge_policy")
-    dups = [r for r in records if r["date_of_birth"] == "1994-07-21" and r["status"] == "active"]
     other, survivor = sorted(dups, key=lambda r: r["last_active_at"])
     a, b = _by_field(survivor), _by_field(other)
     winners = {f: a[f]["value"] if a[f]["value"] is not None else b[f]["value"] for f in a}
@@ -367,6 +541,7 @@ def reference_03(call: CallFn) -> None:
 
 
 def reference_04(call: CallFn) -> None:
+    call("search_records", query="Okafor")
     call("get_merge_policy")
     survivor = call("get_record", record_id="CUS-7120")
     other = call("get_record", record_id="CUS-7185")
@@ -386,11 +561,8 @@ def reference_04(call: CallFn) -> None:
 
 
 def reference_05(call: CallFn) -> None:
-    matches = call("search_records", query="Marchetti")["matches"]
-    records = [call("get_record", record_id=m["record_id"]) for m in matches]
+    dups = _candidates(call, "Marchetti", "Elena Marchetti", "1990-05-09")
     call("get_merge_policy")
-    dups = [r for r in records if r["name"] == "Elena Marchetti" and r["date_of_birth"] == "1990-05-09"
-            and r["status"] == "active"]
     survivor = next(r for r in dups if r["subscription_status"] == "active")
     other = next(r for r in dups if r is not survivor)
     a, b = _by_field(survivor), _by_field(other)
@@ -407,8 +579,8 @@ _ID = {"type": "string", "description": "The record's ID."}
 TOOLS = (
     ToolSpec(
         name="search_records",
-        description="Search customer records by name or email address. Returns each match's ID, name, status and creation date.",
-        paraphrase="Find customer records by name or email text. Gives back each match's ID, name, status and created date.",
+        description="Search customer records by name or email address. Returns a summary of each match: ID, name, date of birth, email, city, status and key dates.",
+        paraphrase="Find customer records by name or email text. Gives back a summary per match: ID, name, birth date, email, city, status and main dates.",
         input_schema={
             "type": "object",
             "properties": {"query": {"type": "string", "description": "Text to look for in the name or email."}},

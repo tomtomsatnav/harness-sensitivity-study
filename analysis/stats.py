@@ -13,7 +13,8 @@ from __future__ import annotations
 import argparse
 import csv
 import sys
-from collections import defaultdict
+import warnings
+from collections import Counter, defaultdict
 from pathlib import Path
 
 import numpy as np
@@ -26,7 +27,11 @@ def load_results(path: str | Path) -> list[EpisodeResult]:
     """Load episodes, dropping api_error ones (they are retried, not counted)."""
     with Path(path).open() as f:
         results = [EpisodeResult.model_validate_json(line) for line in f if line.strip()]
-    return [r for r in results if r.status != "api_error"]
+    kept = {r.key: r for r in results if r.status != "api_error"}  # last line wins
+    dropped = sum(r.status != "api_error" for r in results) - len(kept)
+    if dropped:
+        warnings.warn(f"{path}: dropped {dropped} duplicate episode lines")
+    return list(kept.values())
 
 
 def task_rates(results: list[EpisodeResult], model: str, condition: str) -> dict[str, float]:
@@ -61,6 +66,10 @@ def delta_ci(
     tasks = sorted(set(base) & set(cond))
     if not tasks:
         raise ValueError(f"no tasks with both {baseline} and {condition} results for {model}")
+    per_cell = Counter((r.task_id, r.condition) for r in results if r.model == model and r.condition in (baseline, condition))
+    if len(tasks) < max(len(base), len(cond)) or len(set(per_cell.values())) > 1:
+        warnings.warn(f"{model} {condition}: uneven grid ({len(tasks)} paired tasks, "
+                      f"episodes per task-condition {sorted(set(per_cell.values()))})")
     b = np.array([base[t] for t in tasks])
     c = np.array([cond[t] for t in tasks])
     d = c - b

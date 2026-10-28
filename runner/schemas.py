@@ -7,9 +7,9 @@ from typing import Any, Literal
 from pydantic import BaseModel
 
 # completed: the model ended its turn on its own.  turn_cap: still calling tools at the cap.
-# refusal / max_tokens: the API stop reason.  api_error: the request failed after retries;
+# refusal / max_tokens: the API stop reason.  other_stop: any other stop reason (see `error`).  api_error: the request failed after retries;
 # these episodes are excluded from analysis and re-run on resume.
-Status = Literal["completed", "turn_cap", "refusal", "max_tokens", "api_error"]
+Status = Literal["completed", "turn_cap", "refusal", "max_tokens", "other_stop", "api_error"]
 
 
 class Usage(BaseModel):
@@ -27,6 +27,7 @@ class EpisodeResult(BaseModel):
     condition: str
     run_idx: int
     effort: str | None = None
+    max_turns: int | None = None  # None in files written before this field existed (cap was 15)
 
     status: Status
     success: bool | None  # None only for api_error

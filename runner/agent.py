@@ -82,6 +82,10 @@ def run_episode(
             if response.stop_reason == "max_tokens":
                 status = "max_tokens"
                 break
+            if response.stop_reason not in ("end_turn", "tool_use"):
+                status = "other_stop"
+                error = f"stop_reason={response.stop_reason}"
+                break
             tool_uses = [b for b in response.content if b.type == "tool_use"]
             if not tool_uses:
                 status = "completed"
@@ -98,9 +102,13 @@ def run_episode(
             # All results for one assistant turn go back in a single user message.
             messages.append({"role": "user", "content": results})
             transcript.append({"role": "user", "content": results})
-    except anthropic.BadRequestError:
-        # A malformed request is a harness bug, not a data point. Stop the run.
-        raise
+    except anthropic.APIStatusError as e:
+        # A 4xx other than 429 (bad request, bad key, unknown model) is a setup or harness bug,
+        # not a data point. Stop the run. Overloads and 5xx fall through to api_error.
+        if e.status_code < 500 and e.status_code != 429:
+            raise
+        status = "api_error"
+        error = f"{type(e).__name__}: {e}"
     except anthropic.APIError as e:
         status = "api_error"
         error = f"{type(e).__name__}: {e}"
@@ -114,6 +122,7 @@ def run_episode(
         condition=condition.name,
         run_idx=run_idx,
         effort=effort,
+        max_turns=max_turns,
         status=status,
         success=None if status == "api_error" else (status == "completed" and grade.success),
         state_correct=None if status == "api_error" else grade.success,
