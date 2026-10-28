@@ -39,6 +39,19 @@ SYNONYMS: dict[str, str] = {
     "transfer_id": "move_ref",
     "from_warehouse_id": "source_site",
     "to_warehouse_id": "dest_site",
+
+    # records
+
+
+
+    # scheduling
+
+
+
+    # support
+
+
+
 }
 
 # Keys deliberately left unchanged in every condition.
