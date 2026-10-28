@@ -690,3 +690,161 @@ TASKS = [
         _SEED_CLOSE_ORDER, _CLOSE_EXPECTED, close_order_reference,
     ),
 ]
+
+
+# ---------------------------------------------------------------------------
+# Hard task 1: set priorities, then escalate SLA breaches judged at the priority just set
+
+# T-7101: enterprise/medium -> high, churn risk -> urgent; 1.5 h unanswered against a 1 h target: escalate.
+# T-7102: security incident -> urgent; answered after 1.25 h against a 2 h target: no escalation (using
+#         the current time instead of the first response gives 2.5 h, a false breach).
+# T-7103: free/low -> low, churn risk -> normal; 78 h unanswered against 72 h: escalate (120 h at low).
+# T-7104: already prioritised and long breached, but out of scope.
+_SEED_TRIAGE = [
+    _t("T-7101", "Checkout API returning 502s", "Roughly one in ten checkout calls has failed with a 502 since "
+       "this morning. We are mid-renewal and this is not helping our case internally.", "enterprise",
+       impact="medium", churn_risk=True, created_at="2026-10-20T10:30", customer_name="Ruth Okafor"),
+    _t("T-7102", "Unknown admin added to our account", "An administrator none of us recognises appeared in our "
+       "account overnight and has been exporting data.", "pro", impact="high", category="security_incident",
+       created_at="2026-10-20T09:30", first_response_at="2026-10-20T10:45", customer_name="Diego Alvarez"),
+    _t("T-7103", "Mobile app logs me out daily", "I have to sign in again every morning. I will cancel if this "
+       "keeps up.", "free", impact="low", churn_risk=True, created_at="2026-10-17T06:00", customer_name="Mei Tanaka"),
+    _pool_ticket("T-7104", 6, "pro", priority="high", created_at="2026-10-18T08:00"),
+    *_fillers(7105, 206, open_idx=[0, 2, 3, 5, 8, 10, 13, 15, 18, 20], closed_idx=[1, 9, 17]),
+]
+_TRIAGE_IDS = ("T-7101", "T-7102", "T-7103")
+_TRIAGE_EXPECTED = {
+    "T-7101": {"priority": "urgent", "status": "escalated"},
+    "T-7102": {"priority": "urgent"},
+    "T-7103": {"priority": "normal", "status": "escalated"},
+}
+
+
+def triage_reference(call: CallFn) -> None:
+    rules = call("get_priority_rules")
+    matrix = {(r["plan"], r["impact"]): r["priority"] for r in rules["matrix"]}
+    targets = {(r["plan"], r["priority"]): r["response_hours"] for r in call("get_sla_policy")["targets"]}
+    for tid in _TRIAGE_IDS:
+        t = call("get_ticket", ticket_id=tid)
+        plan = t["customer"]["plan"]
+        priority = matrix[(plan, t["impact"])]
+        if t["customer"]["churn_risk"]:
+            priority = PRIORITIES[min(PRIORITIES.index(priority) + 1, 3)]
+        if t["category"] == "security_incident":
+            priority = "urgent"
+        call("set_priority", ticket_id=tid, priority=priority)
+        created = datetime.fromisoformat(t["created_at"])
+        stop = datetime.fromisoformat(t["first_response_at"]) if t["first_response_at"] else _NOW
+        if (stop - created).total_seconds() / 3600 > targets[(plan, priority)]:
+            call("escalate_ticket", ticket_id=tid)
+
+
+# ---------------------------------------------------------------------------
+# Hard task 2: route intake tickets into queues that have a load limit
+
+_CAPACITY_ROUTING_RULES = {
+    "policy_id": "RT-2026-3",
+    "routes": _ROUTING_RULES["routes"],
+    "capacities": [
+        {"queue": "identity", "max_open": 6, "overflow_queue": "data"},
+        {"queue": "billing", "max_open": 10, "overflow_queue": "data"},
+        {"queue": "payments", "max_open": 4, "overflow_queue": "billing"},
+        {"queue": "data", "max_open": 6, "overflow_queue": "identity"},
+        {"queue": "mobile", "max_open": 6, "overflow_queue": "data"},
+    ],
+    "rules": [
+        "Route on the ticket's product area, never on wording in the subject, which the customer writes.",
+        "Tickets in category billing_dispute go to the billing queue whatever their product area.",
+        "A queue's load is the number of tickets in it with status open or escalated; closed and resolved "
+        "tickets do not count.",
+        "A queue's load must never exceed its maximum. When routing a ticket to its queue would take the load "
+        "over the maximum, route it to that queue's overflow queue instead.",
+        "Route tickets in order of creation time, oldest first, so an older ticket takes a queue's last place "
+        "ahead of a newer one.",
+    ],
+}
+
+# Payments has three tickets that count (two open, one escalated) and two that do not (closed, resolved),
+# so one place is left under its maximum of 4. Of the intake tickets, T-9104 is the oldest and goes to
+# identity; T-9101 takes the last payments place; T-9102 is a billing dispute and goes to billing without
+# touching payments; T-9103 would be the fifth payments ticket and overflows to billing.
+_SEED_CAPACITY = [
+    _t("T-9101", "Charge attempts time out", "About a third of our POST /charges calls hang for thirty seconds "
+       "and then fail.", "pro", product_area="payments_api", created_at="2026-10-19T08:00", customer_name="Jonas Brekke"),
+    _t("T-9102", "Charged twice for one payment", "Our customer was charged twice for a single checkout and we "
+       "are disputing the second charge.", "enterprise", product_area="payments_api", category="billing_dispute",
+       created_at="2026-10-19T09:00", customer_name="Amira Haddad"),
+    _t("T-9103", "Refund endpoint rejects valid IDs", "POST /refunds returns 404 for charge IDs that definitely "
+       "exist in the dashboard.", "pro", product_area="payments_api", created_at="2026-10-19T11:00",
+       customer_name="Felix Moreau"),
+    _t("T-9104", "Password reset link expired instantly", "Every reset link says it has expired as soon as we "
+       "open it.", "free", product_area="auth", created_at="2026-10-18T16:00", customer_name="Hana Novak"),
+    _pool_ticket("T-9090", 2, "pro", queue="payments", priority="normal", created_at="2026-10-18T10:00"),
+    _pool_ticket("T-9091", 7, "enterprise", queue="payments", priority="high", created_at="2026-10-19T07:00"),
+    _pool_ticket("T-9092", 11, "pro", queue="payments", priority="urgent", status="escalated",
+                 created_at="2026-10-18T13:00"),
+    _pool_ticket("T-9093", 16, "free", queue="payments", priority="low", status="closed", resolution="resolved",
+                 created_at="2026-10-15T09:00"),
+    _pool_ticket("T-9094", 19, "pro", queue="payments", priority="normal", status="resolved", resolution="resolved",
+                 created_at="2026-10-16T09:00"),
+    *_fillers(9105, 207, open_idx=[0, 3, 5, 9, 12, 14, 17, 20], closed_idx=[1, 4, 8]),
+]
+_CAPACITY_EXPECTED = {"T-9104": "identity", "T-9101": "payments", "T-9102": "billing", "T-9103": "billing"}
+
+
+class CapacitySupportBackend(SupportBackend):
+    def get_routing_rules(self) -> dict[str, Any]:
+        return _policy_view(_CAPACITY_ROUTING_RULES)
+
+
+def capacity_reference(call: CallFn) -> None:
+    rules = call("get_routing_rules")
+    routes = {r["product_area"]: r["queue"] for r in rules["routes"]}
+    limits = {c["queue"]: c for c in rules["capacities"]}
+    summaries = call("list_tickets")["tickets"]
+    load: dict[str, int] = {}
+    for s in summaries:
+        if s["status"] in ("open", "escalated"):
+            load[s["queue"]] = load.get(s["queue"], 0) + 1
+    intake = sorted((s for s in summaries if s["status"] == "open" and s["queue"] == "intake"),
+                    key=lambda s: s["created_at"])
+    for s in intake:
+        t = call("get_ticket", ticket_id=s["ticket_id"])
+        queue = "billing" if t["category"] == "billing_dispute" else routes[t["product_area"]]
+        if load.get(queue, 0) + 1 > limits[queue]["max_open"]:
+            queue = limits[queue]["overflow_queue"]
+        call("route_ticket", ticket_id=t["ticket_id"], queue=queue)
+        load[queue] = load.get(queue, 0) + 1
+
+
+GET_ROUTING_RULES_WITH_LIMITS = ToolSpec(
+    name="get_routing_rules",
+    description="Return the routing table that maps each product area to a support queue, each queue's load limit and overflow queue, and the rules that apply.",
+    paraphrase="Get the routing table sending each product area to a support queue, every queue's load limit and overflow queue, and the rules in force.",
+    input_schema=_NO_ARGS,
+)
+
+HARD_TASKS = [
+    _task(
+        "support_h1_triage_then_sla",
+        "The time is now 2026-10-20 12:00 UTC. Tickets T-7101, T-7102 and T-7103 arrived without a priority. "
+        "Set each one's priority according to the priority rules. Then, for each of those three tickets, "
+        "check whether it has already breached its first-response SLA at the priority you set, and escalate "
+        "it if it has. Leave all other tickets alone.",
+        (LIST_TICKETS, GET_TICKET, GET_PRIORITY_RULES, GET_SLA_POLICY, SET_PRIORITY, ESCALATE_TICKET),
+        _SEED_TRIAGE, _TRIAGE_EXPECTED, triage_reference,
+    ),
+    Task(
+        task_id="support_h2_queue_capacity",
+        domain="support",
+        instruction=(
+            "Today is 2026-10-20. Route every open ticket still sitting in the 'intake' queue to the correct "
+            "support queue according to the routing rules, which include a load limit for each queue. Leave "
+            "all other tickets alone."
+        ),
+        tools=(LIST_TICKETS, GET_TICKET, GET_ROUTING_RULES_WITH_LIMITS, ROUTE_TICKET),
+        make_backend=lambda: CapacitySupportBackend(_SEED_CAPACITY),
+        grade=_grade_state(_SEED_CAPACITY, {k: {"queue": v} for k, v in _CAPACITY_EXPECTED.items()}),
+        reference_solution=capacity_reference,
+    ),
+]

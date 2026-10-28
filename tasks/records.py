@@ -341,6 +341,130 @@ _SCENARIOS["05"] = {
 }
 
 
+# --- h1: three-way merge; the active subscription pins the newest record as survivor ------------------
+# Survivor NH-533 was created last, so "earliest created" is the trap. Phone comes from NH-410 (most
+# recently verified; NH-472's is null), address from NH-472 (NH-533's is null), consent is opted_out
+# because NH-472 opted out, and the survivor's email stays. NH-601 shares the name but not the birth date.
+_SCENARIOS["h1"] = {
+    "records": [
+        _rec("NH-410", "Noor Haddad", "1987-06-23", "2020-02-14", "2026-09-01", "2026-09-01", "none", [
+            ("email", "noor.haddad@example.com", "2025-01-10", "web_form"),
+            ("phone", "+44 7700 900410", "2026-09-01", "support_desk"),
+            ("address", "4 Lime Walk, Oxford", "2024-03-03", "web_form"),
+            ("marketing_consent", "opted_in", "2025-06-06", "web_form"),
+        ]),
+        _rec("NH-472", "Noor Haddad", "1987-06-23", "2023-07-30", "2026-08-08", "2026-08-08", "lapsed", [
+            ("email", "n.haddad@example.org", "2026-08-08", "billing"),
+            ("phone", None, None, None),
+            ("address", "17 Bell Lane, Reading", "2026-07-07", "shipping"),
+            ("marketing_consent", "opted_out", "2026-02-02", "web_form"),
+        ]),
+        _rec("NH-533", "Noor Haddad", "1987-06-23", "2025-03-12", "2026-09-30", "2026-09-30", "active", [
+            ("email", "noor.h@fernhill.example", "2025-03-12", "checkout"),
+            ("phone", "+44 7700 900533", "2025-03-12", "checkout"),
+            ("address", None, None, None),
+            ("marketing_consent", "opted_in", "2026-09-30", "checkout"),
+        ]),
+        _rec("NH-601", "Noor Haddad", "1991-02-02", "2024-06-01", "2026-10-05", "2026-10-05", "none", [
+            ("email", "noor.haddad91@example.net", "2026-10-05", "web_form"),
+            ("phone", "+44 7700 900601", "2026-10-05", "web_form"),
+            ("address", "8 Castle Row, Windsor", "2026-10-05", "web_form"),
+            ("marketing_consent", "opted_in", "2026-10-05", "web_form"),
+        ]),
+    ],
+    "policy": {
+        "policy_id": "MP-2026-6",
+        "rules": [
+            "Two records are duplicates only if both the name and the date of birth match; a customer may have "
+            "more than two duplicates.",
+            "A record with an active subscription must be the survivor and can never be archived. If no duplicate "
+            "has an active subscription, the survivor is the duplicate with the earliest creation date.",
+            "The survivor's email is its login and is always kept.",
+            "For phone and address, the most recently verified value across all the duplicates wins, whichever "
+            "record holds it; a null value never wins.",
+            "For marketing_consent, if any duplicate is opted_out the merged record is opted_out.",
+            "Archive every other duplicate with merged_into set to the survivor's ID.",
+        ],
+    },
+    "survivor": "NH-533", "losers": ["NH-410", "NH-472"],
+    "changes": {"phone": "+44 7700 900410", "address": "17 Bell Lane, Reading", "marketing_consent": "opted_out"},
+    "distractors": _distractors(
+        "11", "NH-", [n for n in range(400, 700) if n not in (410, 472, 533, 601)],
+        [("Noor Haddad", 8), ("Nour Haddad", 2), ("Noora Haddad", 2), ("Omar Haddad", 2), ("Noor Haddadi", 1),
+         ("Noor Haddad-Khan", 1), ("Noor Hadad", 1)],
+        {("Noor Haddad", "1987-06-23"), ("Noor Haddad", "1991-02-02")},
+        ["Oxford", "Reading", "Windsor", "Swindon", "Slough"], "+44 7700 9", with_consent=True),
+}
+
+# --- h2: source ranking, overridden per field by whoever made the most recent change -------------------
+# Email: ranking favours billing (9277) but 9210's last change was by the customer, so it stays. Phone:
+# both last changed by staff, so the ranking decides (support_desk beats web_form) and 9277's wins; the
+# older customer-made change in 9210's history is a trap. Address: both last changed by the customer,
+# so the later change (9277) wins even though the ranking favours billing (9210).
+_SCENARIOS["h2"] = {
+    "records": [
+        _rec("CUS-9210", "Felix Moreau", "1983-11-02", "2021-05-05", "2026-03-03", "2026-03-03", "none", [
+            ("email", "felix.moreau@example.com", "2026-03-03", "crm"),
+            ("phone", "+33 6 55 01 02 10", "2026-01-15", "web_form"),
+            ("address", "12 Rue Lepic, Paris", "2025-11-11", "billing"),
+        ]),
+        _rec("CUS-9277", "Felix Moreau", "1983-11-02", "2024-09-09", "2026-08-08", "2026-08-08", "none", [
+            ("email", "f.moreau@example.org", "2026-06-06", "billing"),
+            ("phone", "+33 6 55 01 02 77", "2026-05-05", "support_desk"),
+            ("address", "3 Allee des Tilleuls, Lyon", "2026-08-08", "shipping"),
+        ]),
+    ],
+    "history": {
+        "CUS-9210": [
+            {"field": "email", "value": "felix.moreau@legacy.example", "changed_at": "2021-05-05", "changed_by": "import"},
+            {"field": "email", "value": "fmoreau@example.com", "changed_at": "2023-02-02", "changed_by": "staff"},
+            {"field": "email", "value": "felix.moreau@example.com", "changed_at": "2026-03-03", "changed_by": "customer"},
+            {"field": "phone", "value": "+33 6 55 01 00 01", "changed_at": "2021-05-05", "changed_by": "import"},
+            {"field": "phone", "value": "+33 6 55 01 02 09", "changed_at": "2024-04-04", "changed_by": "customer"},
+            {"field": "phone", "value": "+33 6 55 01 02 10", "changed_at": "2026-01-15", "changed_by": "staff"},
+            {"field": "address", "value": "1 Rue de Rivoli, Paris", "changed_at": "2021-05-05", "changed_by": "import"},
+            {"field": "address", "value": "12 Rue Lepic, Paris", "changed_at": "2025-11-11", "changed_by": "customer"},
+        ],
+        "CUS-9277": [
+            {"field": "email", "value": "felix.m@example.org", "changed_at": "2024-09-09", "changed_by": "import"},
+            {"field": "email", "value": "f.moreau@example.org", "changed_at": "2026-06-06", "changed_by": "staff"},
+            {"field": "phone", "value": "+33 6 55 01 02 70", "changed_at": "2024-09-09", "changed_by": "import"},
+            {"field": "phone", "value": "+33 6 55 01 02 77", "changed_at": "2026-05-05", "changed_by": "staff"},
+            {"field": "address", "value": "5 Place Bellecour, Lyon", "changed_at": "2024-09-09", "changed_by": "import"},
+            {"field": "address", "value": "7 Place Bellecour, Lyon", "changed_at": "2026-02-02", "changed_by": "staff"},
+            {"field": "address", "value": "3 Allee des Tilleuls, Lyon", "changed_at": "2026-08-08", "changed_by": "customer"},
+        ],
+    },
+    "policy": {
+        "policy_id": "MP-2026-7",
+        "rules": [
+            "Unless a later rule says otherwise, for each field the value from the highest-ranked source in this "
+            "policy's source ranking wins.",
+            "A null value never wins; skip it and use the next-ranked source that has a value.",
+            "A value whose most recent change in the change history was made by the customer beats a value whose "
+            "most recent change was made by staff or an import, whatever the source ranking says. Only each "
+            "field's most recent change counts; earlier changes do not.",
+            "If both values were last changed by the customer, the later change date wins.",
+            "Merge into the survivor named in the request and archive the other record with merged_into set to "
+            "the survivor.",
+        ],
+        "source_precedence": [
+            {"field": "email", "sources": ["billing", "crm", "web_form"]},
+            {"field": "phone", "sources": ["crm", "support_desk", "web_form"]},
+            {"field": "address", "sources": ["billing", "shipping", "crm"]},
+        ],
+    },
+    "survivor": "CUS-9210", "loser": "CUS-9277",
+    "changes": {"phone": "+33 6 55 01 02 77", "address": "3 Allee des Tilleuls, Lyon"},
+    "distractors": _distractors(
+        "12", "CUS-", [n for n in range(9200, 9300) if n not in (9210, 9277)],
+        [("Felix Moreau", 7), ("Felix Moreaux", 2), ("Felicie Moreau", 2), ("Felix Morel", 2), ("Jules Moreau", 2),
+         ("Felix Moreau-Dubois", 1)],
+        {("Felix Moreau", "1983-11-02")},
+        ["Paris", "Lyon", "Lille", "Nantes", "Bordeaux"], "+33 6 55 01 "),
+}
+
+
 _POLICY_META = {
     "version": 4, "effective_from": "2026-01-01", "owner": "data_governance", "last_reviewed_at": "2026-09-15",
     "applies_to": ["customer_records", "lead_records"],
@@ -366,7 +490,7 @@ class RecordsBackend:
         scenario = _SCENARIOS[key]
         self.records: list[dict[str, Any]] = [
             _decorate(r) for r in copy.deepcopy(scenario["records"] + scenario["distractors"])]
-        random.Random(SEED + int(key)).shuffle(self.records)
+        random.Random(SEED + int(key) if key.isdigit() else f"{SEED}:{key}").shuffle(self.records)
         self.policy = _policy_with_meta(copy.deepcopy(scenario["policy"]))
         self.history = copy.deepcopy(scenario.get("history", {}))
 
@@ -459,10 +583,16 @@ class RecordsBackend:
         }
 
 
+def _losers(scenario: dict[str, Any]) -> list[str]:
+    """The records a scenario archives: one for the study tasks, possibly several for the hard ones."""
+    return scenario["losers"] if "losers" in scenario else [scenario["loser"]]
+
+
 def _make_grader(key: str):
     scenario = _SCENARIOS[key]
     expected = RecordsBackend(key).snapshot()["records"]
-    expected[scenario["loser"]].update(status="archived", merged_into=scenario["survivor"])
+    for loser in _losers(scenario):
+        expected[loser].update(status="archived", merged_into=scenario["survivor"])
     expected[scenario["survivor"]]["values"].update(scenario["changes"])
 
     def grade(backend: RecordsBackend) -> Grade:
@@ -571,6 +701,53 @@ def reference_05(call: CallFn) -> None:
         winners[f] = max((a[f], b[f]), key=lambda e: e["verified_at"])["value"]
     opted_out = "opted_out" in (a["marketing_consent"]["value"], b["marketing_consent"]["value"])
     winners["marketing_consent"] = "opted_out" if opted_out else "opted_in"
+    _apply(call, survivor, other, winners)
+
+
+def reference_h1(call: CallFn) -> None:
+    dups = _candidates(call, "Noor Haddad", "Noor Haddad", "1987-06-23")
+    call("get_merge_policy")
+    with_sub = [r for r in dups if r["subscription_status"] == "active"]
+    survivor = with_sub[0] if with_sub else min(dups, key=lambda r: r["created_at"])
+    fields = [_by_field(r) for r in dups]
+    winners = {"email": _by_field(survivor)["email"]["value"]}
+    for f in ("phone", "address"):
+        held = [fl[f] for fl in fields if fl[f]["value"] is not None]
+        winners[f] = max(held, key=lambda e: e["verified_at"])["value"]
+    opted_out = any(fl["marketing_consent"]["value"] == "opted_out" for fl in fields)
+    winners["marketing_consent"] = "opted_out" if opted_out else "opted_in"
+    current = _by_field(survivor)
+    for f, value in winners.items():
+        if current[f]["value"] != value:
+            call("update_record", record_id=survivor["record_id"], field=f, value=value)
+    for other in dups:
+        if other is not survivor:
+            call("archive_record", record_id=other["record_id"], merged_into=survivor["record_id"])
+
+
+def reference_h2(call: CallFn) -> None:
+    policy = call("get_merge_policy")
+    ranking = {e["field"]: e["sources"] for e in policy["source_precedence"]}
+    survivor = call("get_record", record_id="CUS-9210")
+    other = call("get_record", record_id="CUS-9277")
+    history = {r["record_id"]: call("get_field_history", record_id=r["record_id"])["changes"]
+               for r in (survivor, other)}
+    a, b = _by_field(survivor), _by_field(other)
+
+    def last_change(record: dict[str, Any], field: str) -> dict[str, Any]:
+        return max((c for c in history[record["record_id"]] if c["field"] == field), key=lambda c: c["changed_at"])
+
+    winners = {}
+    for field, sources in ranking.items():
+        ca, cb = last_change(survivor, field), last_change(other, field)
+        by_customer = [(e, c) for e, c in ((a[field], ca), (b[field], cb))
+                       if c["changed_by"] == "customer" and e["value"] is not None]
+        if by_customer:
+            winners[field] = max(by_customer, key=lambda ec: ec[1]["changed_at"])[0]["value"]
+        else:
+            held = [e for e in (a[field], b[field]) if e["value"] is not None]
+            winners[field] = min(held, key=lambda e: sources.index(e["source"]) if e["source"] in sources
+                                 else len(sources))["value"]
     _apply(call, survivor, other, winners)
 
 
@@ -683,4 +860,15 @@ TASKS = [
         "Elena Marchetti, born 1990-05-09, has two active customer records. Merge them as the merge policy "
         "directs and archive the one that does not survive."),
         reference_05),
+]
+
+HARD_TASKS = [
+    _task("h1", "three_way_merge", (
+        "Noor Haddad, born 1987-06-23, has three active customer records. Merge them as the merge policy "
+        "directs: update the surviving record with the winning field values and archive the others."),
+        reference_h1),
+    _task("h2", "history_overrides_ranking", (
+        "Customer records CUS-9210 and CUS-9277 both belong to Felix Moreau. Merge CUS-9277 into CUS-9210 "
+        "following the merge policy, then archive CUS-9277."),
+        reference_h2, tools=(*TOOLS, HISTORY_TOOL)),
 ]

@@ -155,7 +155,7 @@ def default_tools(specs: Sequence[ToolSpec]) -> list[dict[str, Any]]:
 @dataclass(frozen=True)
 class Condition:
     name: str
-    applies_to: str  # "none" | "observations" | "tools"
+    applies_to: str  # "none" | "observations" | "tools" | "both"
     summary: str
     tools_fn: Callable[[Sequence[ToolSpec]], list[dict[str, Any]]] = default_tools
     to_wire: Callable[[Data], Data] = lambda d: d  # key renaming / reordering
@@ -191,6 +191,18 @@ def _paraphrased_tools(specs: Sequence[ToolSpec]) -> list[dict[str, Any]]:
     return [{"name": s.name, "description": s.paraphrase, "input_schema": s.input_schema} for s in specs]
 
 
+def _stacked_tools(specs: Sequence[ToolSpec]) -> list[dict[str, Any]]:
+    return _paraphrased_tools(list(specs)[::-1])
+
+
+def _synonym_keys(data: Data) -> Data:
+    return map_keys(data, lambda k: SYNONYMS.get(k, k))
+
+
+def _original_keys(data: Data) -> Data:
+    return map_keys(data, lambda k: SYNONYMS_INVERSE.get(k, k))
+
+
 CONDITIONS: dict[str, Condition] = {
     c.name: c
     for c in [
@@ -210,8 +222,8 @@ CONDITIONS: dict[str, Condition] = {
         ),
         Condition(
             "key_naming_synonym", "observations", "Keys replaced by neutral synonyms (qty for quantity)",
-            to_wire=lambda d: map_keys(d, lambda k: SYNONYMS.get(k, k)),
-            from_wire=lambda d: map_keys(d, lambda k: SYNONYMS_INVERSE.get(k, k)),
+            to_wire=_synonym_keys,
+            from_wire=_original_keys,
         ),
         Condition("format_yaml", "observations", "Observations as YAML", dumps=yaml_dumps, loads=yaml.safe_load),
         Condition("format_xml", "observations", "Observations as XML", dumps=xml_dumps, loads=xml_loads),
@@ -220,6 +232,17 @@ CONDITIONS: dict[str, Condition] = {
         Condition(
             "description_paraphrase", "tools", "Tool descriptions paraphrased, same meaning, length ±10%",
             tools_fn=_paraphrased_tools,
+        ),
+        # Worst case: the five study perturbations at once. Keys are renamed first, then the order is
+        # reversed, then the result is rendered as XML; decoding only needs the inverse renaming.
+        Condition(
+            "stacked", "both",
+            "Synonym keys, reversed field order and XML, with the tool list reversed and descriptions paraphrased",
+            tools_fn=_stacked_tools,
+            to_wire=lambda d: reorder_keys(_synonym_keys(d), _reverse),
+            from_wire=_original_keys,
+            dumps=xml_dumps,
+            loads=xml_loads,
         ),
     ]
 }

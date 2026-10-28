@@ -571,3 +571,156 @@ TASKS.extend([
         reference_solution=reference_closure,
     ),
 ])
+
+
+# --- hard tasks ---------------------------------------------------------------------------------
+
+# inventory_h1: two destinations, handled in order, with a same-region-first rule and a fallback to
+# the largest surplus at the time of the transfer. NJE (northeast, surplus 45) covers BOS's 20; that
+# drops NJE to 25, so SEA's fallback is DAL (40), not NJE. PDX is SEA's region but has only 10. CHI
+# has the most on hand and the most available but almost no surplus.
+class RegionBackend(InventoryBackend):
+    STOCK = _expand({
+        ("WID-204", "BOS"): _lv(25, 5, 5),      # 20 available: needs 20
+        ("WID-204", "SEA"): _lv(30, 20, 8),     # 10 available: needs 30
+        ("WID-204", "NJE"): _lv(70, 15, 10),    # surplus 45
+        ("WID-204", "DAL"): _lv(80, 25, 15),    # surplus 40
+        ("WID-204", "PDX"): _lv(22, 4, 8),      # surplus 10
+        ("WID-204", "CHI"): _lv(120, 60, 55),   # surplus 5
+        ("WID-204", "PHX"): _lv(60, 45, 5),     # surplus 10
+        ("WID-204", "ATL"): _lv(44, 10, 20),    # surplus 14
+        ("WID-204", "MIA"): _lv(30, 2, 25),     # surplus 3
+        ("WID-204", "DEN"): _lv(50, 30, 10),    # surplus 10
+        ("WID-204", "LAX"): _lv(90, 70, 10),    # surplus 10
+    }, seed=106, fixed=("WID-204",))
+
+
+def grade_region(backend: InventoryBackend) -> Grade:
+    return _grade_on_hand(backend, {
+        ("WID-204", "NJE"): -20, ("WID-204", "BOS"): 20,
+        ("WID-204", "DAL"): -30, ("WID-204", "SEA"): 30,
+    })
+
+
+def reference_region(call: CallFn) -> None:
+    region = {w["warehouse_id"]: w["region"] for w in call("list_warehouses")["warehouses"]}
+    for dest in ("BOS", "SEA"):
+        rows = call("get_sku_stock", sku="WID-204")["warehouses"]  # re-read: the first transfer changes surpluses
+        need = 40 - _avail(next(r for r in rows if r["warehouse_id"] == dest))
+        donors = [r for r in rows if r["warehouse_id"] not in ("BOS", "SEA")]
+        local = [r for r in donors if region[r["warehouse_id"]] == region[dest] and _surplus(r) >= need]
+        source = local[0] if local else max(donors, key=_surplus)
+        call("transfer_stock", sku="WID-204", from_warehouse_id=source["warehouse_id"],
+             to_warehouse_id=dest, quantity=need)
+
+
+# inventory_h2: stock may only move along lanes. Both lanes into SEA (LAX, PDX) lack the surplus to
+# cover the shortfall of 30, so it is routed DAL -> LAX -> SEA. LAX contributes its own surplus of 12
+# and takes in only the 18 it lacks. PHX also feeds LAX but is fully reserved; CHI has a large surplus
+# but no useful lane.
+_LANES = (
+    ("DAL", "LAX"), ("PHX", "LAX"), ("LAX", "SEA"), ("PDX", "SEA"), ("CHI", "DAL"), ("DAL", "BOS"),
+    ("NJE", "BOS"), ("BOS", "NJE"), ("ATL", "MIA"), ("MIA", "CLT"), ("DEN", "SLC"), ("SLC", "DEN"),
+    ("CHI", "MSP"), ("DAL", "PHX"),
+)
+
+
+class LaneBackend(InventoryBackend):
+    STOCK = _expand({
+        ("WID-204", "SEA"): _lv(18, 8, 5),      # 10 available: needs 30
+        ("WID-204", "LAX"): _lv(40, 18, 10),    # surplus 12
+        ("WID-204", "PDX"): _lv(14, 4, 6),      # surplus 4
+        ("WID-204", "DAL"): _lv(90, 20, 30),    # surplus 40
+        ("WID-204", "PHX"): _lv(50, 50, 5),     # fully reserved
+        ("WID-204", "CHI"): _lv(100, 20, 20),   # surplus 60, no lane toward SEA
+        ("WID-204", "BOS"): _lv(30, 10, 5),
+        ("WID-204", "NJE"): _lv(45, 5, 10),
+    }, seed=107, fixed=("WID-204",))
+    LANES = _LANES
+
+    def list_lanes(self) -> dict[str, Any]:
+        return {"lanes": [
+            {"from_warehouse_id": a, "to_warehouse_id": b, "transit_days": _rng("lane", a, b).choice([1, 2, 3, 4])}
+            for a, b in self.LANES
+        ]}
+
+    def transfer_stock(self, sku: str, from_warehouse_id: str, to_warehouse_id: str, quantity: int) -> dict[str, Any]:
+        if (from_warehouse_id, to_warehouse_id) not in self.LANES:
+            raise ToolError(f"No shipping lane from {from_warehouse_id} to {to_warehouse_id}.")
+        return super().transfer_stock(sku, from_warehouse_id, to_warehouse_id, quantity)
+
+
+def grade_lanes(backend: InventoryBackend) -> Grade:
+    return _grade_on_hand(backend, {("WID-204", "DAL"): -18, ("WID-204", "LAX"): -12, ("WID-204", "SEA"): 30})
+
+
+def reference_lanes(call: CallFn) -> None:
+    call("list_warehouses")
+    lanes = call("list_lanes")["lanes"]
+    rows = {r["warehouse_id"]: r for r in call("get_sku_stock", sku="WID-204")["warehouses"]}
+    need = 40 - _avail(rows["SEA"])
+    into_sea = [lane["from_warehouse_id"] for lane in lanes if lane["to_warehouse_id"] == "SEA"]
+    direct = [w for w in into_sea if w in rows and _surplus(rows[w]) >= need]
+    if direct:
+        call("transfer_stock", sku="WID-204", from_warehouse_id=direct[0], to_warehouse_id="SEA", quantity=need)
+        return
+    for mid in into_sea:
+        lack = need - max(0, _surplus(rows[mid])) if mid in rows else need
+        upstream = [lane["from_warehouse_id"] for lane in lanes if lane["to_warehouse_id"] == mid]
+        source = next((w for w in upstream if w in rows and _surplus(rows[w]) >= lack), None)
+        if source is None:
+            continue
+        call("transfer_stock", sku="WID-204", from_warehouse_id=source, to_warehouse_id=mid, quantity=lack)
+        call("transfer_stock", sku="WID-204", from_warehouse_id=mid, to_warehouse_id="SEA", quantity=need)
+        return
+    raise AssertionError("no two-hop route covers the shortfall")
+
+
+_LANES_TOOL = ToolSpec(
+    name="list_lanes",
+    description="List the shipping lanes stock can move along, each as a source warehouse and a destination warehouse.",
+    paraphrase="Return every shipping lane that stock may travel on, given as a source warehouse and a destination warehouse.",
+    input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+)
+
+_LANE_TRANSFER_TOOL = ToolSpec(
+    name="transfer_stock",
+    description="Move on-hand units of a SKU from one warehouse to another along a shipping lane. Reserved units cannot be moved.",
+    paraphrase="Transfer on-hand units of a SKU between two warehouses joined by a shipping lane. Units that are reserved can't be moved.",
+    input_schema=_TRANSFER_TOOL.input_schema,
+)
+
+HARD_TASKS = [
+    Task(
+        task_id="inventory_h1_region_first",
+        domain="inventory",
+        instruction=(
+            "Warehouses BOS and SEA must each end with exactly 40 available units of SKU WID-204. Top up BOS "
+            "first and then SEA, each with a single transfer from one other warehouse (not BOS or SEA). Choose "
+            "the source like this: if a warehouse in the same region as the destination can supply the whole "
+            "shortfall without breaking the rules below, use it; otherwise use the warehouse, in any region, "
+            "that has the largest surplus (available units minus safety stock) at the time of that transfer. "
+            + _RULES
+        ),
+        tools=(_LIST_TOOL, _SKU_STOCK_TOOL, _GET_TOOL, _TRANSFER_TOOL),
+        make_backend=RegionBackend,
+        grade=grade_region,
+        reference_solution=reference_region,
+    ),
+    Task(
+        task_id="inventory_h2_lane_routing",
+        domain="inventory",
+        instruction=(
+            "Warehouse SEA needs exactly 40 available units of SKU WID-204, delivered in a single transfer into "
+            "SEA. Stock can only move along the shipping lanes in the lane table, in the direction shown. If no "
+            "warehouse with a lane into SEA can supply the whole shortfall on its own, route the stock through "
+            "one that has such a lane: that intermediate warehouse sends SEA the whole shortfall, drawing on its "
+            "own surplus (available units minus safety stock) first and taking in, from a warehouse with a lane "
+            "into it, only the units it would otherwise lack. " + _RULES
+        ),
+        tools=(_LIST_TOOL, _LANES_TOOL, _SKU_STOCK_TOOL, _GET_TOOL, _LANE_TRANSFER_TOOL),
+        make_backend=LaneBackend,
+        grade=grade_lanes,
+        reference_solution=reference_lanes,
+    ),
+]

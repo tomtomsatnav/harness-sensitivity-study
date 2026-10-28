@@ -58,10 +58,25 @@ and `api_error` episodes are retried. Use `--dry-run` to see the plan.
 | `format_xml` / `format_yaml` | observations | xml |
 | `tool_order_reverse` / `tool_order_shuffle` | tool definitions | reverse |
 | `description_paraphrase` | tool definitions | yes |
+| `stacked` | both | no |
 
 The main grid (`STUDY_CONDITIONS` in `perturb/conditions.py`) uses one variant per family to
 keep 6 conditions. Every variant is covered by the guard tests and can be run with
-`--conditions all` or by name.
+`--conditions all` or by name. `stacked` is the worst case: the five study perturbations at
+once (keys renamed, then field order reversed, then XML; tool list reversed with paraphrased
+descriptions).
+
+## Hard tasks
+
+The 25 study tasks saturate at ~99% for Haiku. `HARD_TASKS` (`--tasks hard`, IDs
+`<domain>_h1_*` and `<domain>_h2_*`) adds two harder tasks per domain that need interacting
+rules with exceptions, arithmetic across records, cross-referencing between tools, or state
+that changes as you act. They sit outside `ALL_TASKS`, so the existing results stay valid, and
+the same guard tests cover them in every condition.
+
+```
+python -m runner.run --models haiku --tasks hard --conditions baseline stacked --runs 3 --out results/hard.jsonl
+```
 
 ## Design decisions
 

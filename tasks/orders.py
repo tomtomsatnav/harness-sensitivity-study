@@ -736,3 +736,209 @@ _NEW_TASKS = [
 ]
 
 TASKS.extend(_NEW_TASKS)
+
+
+# --- hard tasks ---------------------------------------------------------------------------------
+
+# orders_h1: a damaged-order refund for a gold customer runs into a rolling cash-refund cap. Earlier
+# refunds show on the order list; two fall inside the 90-day window (25 + 60) and one, the largest,
+# falls outside it. Cap 150 leaves 65 in cash; the remaining 63.50 of the 128.50 owed is store credit.
+class RefundCapBackend(OrdersBackend):
+    CUSTOMERS = [
+        {"customer_id": "C-4410", "name": "Maya Lindqvist", "email": "maya.lindqvist@example.com", "tier": "gold"},
+        {"customer_id": "C-4411", "name": "Maja Lindquist", "email": "maja.lindquist@example.com", "tier": "silver"},
+    ]
+    ORDERS = [
+        _order_row("ORD-80231", "C-4410", "2026-10-08", "delivered", "2026-10-13", 9.5,
+                   [_item("CST-IRN-1", "Cast-iron casserole", 1, 89.0), _item("LIN-NAP-6", "Linen napkins (6)", 2, 15.0)]),
+        _order_row("ORD-79880", "C-4410", "2026-09-14", "delivered", "2026-09-18", 4.99,
+                   [_item("TRY-OAK-1", "Oak serving tray", 1, 42.0)]),
+        _order_row("ORD-78102", "C-4410", "2026-07-29", "delivered", "2026-08-02", 5.99,
+                   [_item("BLK-WOL-1", "Wool blanket", 1, 74.0)]),
+        _order_row("ORD-75540", "C-4410", "2026-06-02", "delivered", "2026-06-06", 0.0,
+                   [_item("KTL-ELC-1", "Electric kettle", 1, 129.99)]),
+        *_extra_orders("C-4410", 16, "2026-06-02", 52000, 71),
+        *_extra_orders("C-4411", 5, "2026-10-01", 56000, 72),
+    ]
+    # Refunds issued before this task starts, shown on the orders they were issued against.
+    PRIOR_REFUNDS = {
+        "ORD-79880": [{"refund_id": "RF-0912", "amount": 25.0, "reason": "wrong_item", "status": "issued",
+                       "issued_at": "2026-09-20"}],
+        "ORD-78102": [{"refund_id": "RF-0877", "amount": 60.0, "reason": "damaged", "status": "issued",
+                       "issued_at": "2026-08-05"}],
+        "ORD-75540": [{"refund_id": "RF-0790", "amount": 95.0, "reason": "damaged", "status": "issued",
+                       "issued_at": "2026-06-10"}],
+    }
+    POLICY = {
+        "policy_id": "RP-2026-7",
+        "cash_refund_cap": 150.0,
+        "cap_window_days": 90,
+        "rules": [
+            "Items that arrived damaged are refunded at the full order subtotal.",
+            "Shipping charges are refunded in addition to the subtotal for customers on the gold tier, and not otherwise.",
+            "Refunds must be requested within 30 days of the delivery date.",
+            "Cash refunds to one customer are capped: the cash refunds already issued to the customer within the "
+            "cap window (the number of days set by this policy, counted back from today), plus the new refund, "
+            "must not exceed the cash refund cap set by this policy. Refunds issued before the window opened do "
+            "not count toward it.",
+            "When the amount owed is more than the cap allows, issue a cash refund for what the cap allows and "
+            "issue the rest as store credit against the same order. If the cap allows nothing, issue the whole "
+            "amount as store credit.",
+            "Store credit never counts toward the cap.",
+        ],
+    }
+
+    def list_orders(self, customer_id: str) -> dict[str, Any]:
+        out = super().list_orders(customer_id)
+        for row in out["orders"]:
+            row["refunds"] = copy.deepcopy(self.PRIOR_REFUNDS.get(row["order_id"], []))
+        return out
+
+    def get_order(self, order_id: str) -> dict[str, Any]:
+        out = super().get_order(order_id)
+        out["refunds"] = copy.deepcopy(self.PRIOR_REFUNDS.get(order_id, []))
+        return out
+
+
+def grade_refund_cap(backend: OrdersBackend) -> Grade:
+    if len(backend.refunds) != 1:
+        return Grade(success=False, detail=f"expected exactly 1 cash refund, found {len(backend.refunds)}")
+    r = backend.refunds[0]
+    if r["order_id"] != "ORD-80231":
+        return Grade(success=False, detail=f"refunded {r['order_id']}, expected ORD-80231")
+    if abs(r["amount"] - 65.0) > 0.005:
+        return Grade(success=False, detail=f"cash refund {r['amount']}, expected 65.00 (150 cap minus 85 already used)")
+    if r["reason"] != "damaged":
+        return Grade(success=False, detail=f"reason {r['reason']!r}, expected 'damaged'")
+    if len(backend.store_credits) != 1:
+        return Grade(success=False, detail=f"expected exactly 1 store credit, found {len(backend.store_credits)}")
+    c = backend.store_credits[0]
+    if c["order_id"] != "ORD-80231" or c["customer_id"] != "C-4410":
+        return Grade(success=False, detail=f"credit on {c['order_id']} for {c['customer_id']}, expected ORD-80231/C-4410")
+    if abs(c["amount"] - 63.5) > 0.005:
+        return Grade(success=False, detail=f"store credit {c['amount']}, expected 63.50 (128.50 owed minus 65.00 cash)")
+    return Grade(success=True, detail="correct refund and store credit")
+
+
+def reference_refund_cap(call: CallFn) -> None:
+    customer = call("find_customer", email="maya.lindqvist@example.com")
+    orders = call("list_orders", customer_id=customer["customer_id"])["orders"]
+    latest = max(orders, key=lambda o: o["placed_at"])
+    order = call("get_order", order_id=latest["order_id"])
+    policy = call("get_refund_policy")
+    window_opens = TODAY - timedelta(days=policy["cap_window_days"])
+    used = sum(r["amount"] for o in orders for r in o["refunds"]
+               if r["status"] == "issued" and date.fromisoformat(r["issued_at"]) >= window_opens)
+    owed = round(order["subtotal"] + (order["shipping"] if customer["tier"] == "gold" else 0.0), 2)
+    allowed = max(0.0, round(policy["cash_refund_cap"] - used, 2))
+    cash = min(owed, allowed)
+    if cash > 0:
+        call("issue_refund", order_id=order["order_id"], amount=cash, reason="damaged")
+    if owed - cash > 0:
+        call("issue_store_credit", customer_id=customer["customer_id"], order_id=order["order_id"],
+             amount=round(owed - cash, 2))
+
+
+# orders_h2: a change-of-mind return of two lines. One requested line is food and cannot be returned,
+# a restocking fee applies because the customer is neither gold nor inside the waiver period, and
+# shipping is excluded. A near-duplicate order holds one throw and is outside the window.
+_FOOD_SKUS = frozenset({"TEA-GRN-50", "TEA-EGY-40", "OIL-OLV-1"})
+
+
+class ReturnFeeBackend(OrdersBackend):
+    CUSTOMERS = [
+        {"customer_id": "C-5120", "name": "Jonah Whitcombe", "email": "jonah.whitcombe@example.com", "tier": "silver"},
+    ]
+    ORDERS = [
+        _order_row("ORD-81455", "C-5120", "2026-10-06", "delivered", "2026-10-10", 6.5,
+                   [_item("THR-WOL-1", "Wool throw blanket", 2, 62.0), _item("OIL-OLV-1", "Olive oil tin", 1, 22.0),
+                    _item("CND-SET-3", "Candle set", 1, 11.5)]),
+        _order_row("ORD-80990", "C-5120", "2026-09-08", "delivered", "2026-09-12", 5.99,
+                   [_item("THR-WOL-1", "Wool throw blanket", 1, 62.0), _item("MUG-STN-2", "Stoneware mugs (2)", 1, 21.0)]),
+        _order_row("ORD-81602", "C-5120", "2026-10-15", "delivered", "2026-10-17", 0.0,
+                   [_item("TEA-GRN-50", "Green tea, 50 bags", 1, 18.25)]),
+        *_extra_orders("C-5120", 18, "2026-09-08", 58000, 81),
+    ]
+    POLICY = {
+        "policy_id": "RP-2026-8",
+        "restocking_fee_percent": 15,
+        "fee_waiver_days": 7,
+        "rules": [
+            "Change-of-mind returns are accepted within 30 days of the delivery date and are refunded with reason 'other'.",
+            "The refund covers only the returned lines: quantity times unit price for each returned line.",
+            "A restocking fee of the percentage set by this policy is deducted from each returned line, unless the "
+            "customer is on the gold tier or the return is requested within the fee-waiver period (in days, "
+            "counted from the delivery date).",
+            "Items with the FOOD tax code are perishable and cannot be returned; leave them out of the refund "
+            "even if the customer asks to return them.",
+            "Shipping is never refunded on a change-of-mind return.",
+        ],
+    }
+
+    def get_order(self, order_id: str) -> dict[str, Any]:
+        out = super().get_order(order_id)
+        for item in out["items"]:
+            if item["sku"] in _FOOD_SKUS:
+                item["tax_code"] = "FOOD"
+            elif item["tax_code"] == "FOOD":
+                item["tax_code"] = "GEN"
+        return out
+
+
+def grade_return_fee(backend: OrdersBackend) -> Grade:
+    return _grade_one_refund(backend, "ORD-81455", 105.4, "other")
+
+
+def reference_return_fee(call: CallFn) -> None:
+    customer = call("find_customer", email="jonah.whitcombe@example.com")
+    orders = call("list_orders", customer_id=customer["customer_id"])["orders"]
+    candidates = [o for o in orders if "wool throw" in o["item_summary"].lower()]
+    details = [call("get_order", order_id=o["order_id"]) for o in candidates]
+    order = next(d for d in details
+                 if any("wool throw" in i["description"].lower() and i["quantity"] == 2 for i in d["items"])
+                 and any("olive oil" in i["description"].lower() for i in d["items"]))
+    policy = call("get_refund_policy")
+    wanted = [i for i in order["items"]
+              if "wool throw" in i["description"].lower() or "olive oil" in i["description"].lower()]
+    returnable = [i for i in wanted if i["tax_code"] != "FOOD"]
+    since_delivery = (TODAY - date.fromisoformat(order["delivered_at"])).days
+    fee = 0 if customer["tier"] == "gold" or since_delivery <= policy["fee_waiver_days"] else policy["restocking_fee_percent"]
+    amount = sum(i["quantity"] * i["unit_price"] for i in returnable) * (100 - fee) / 100
+    call("issue_refund", order_id=order["order_id"], amount=round(amount, 2), reason="other")
+
+
+_LIST_ORDERS_WITH_REFUNDS = ToolSpec(
+    name="list_orders",
+    description="List every order placed by a customer, with each order's ID, placement date, status, item summary, total and any refunds already issued against it.",
+    paraphrase="Return all orders a customer has placed, including each order's ID, date placed, status, item summary, total and any refunds already issued on it.",
+    input_schema=TOOLS[1].input_schema,
+)
+
+HARD_TASKS = [
+    Task(
+        task_id="orders_h1_refund_cap",
+        domain="orders",
+        instruction=(
+            "Today is 2026-10-20. The customer with email maya.lindqvist@example.com reports that her most "
+            "recent order arrived damaged. Settle her claim as the refund policy requires."
+        ),
+        tools=(TOOLS[0], _LIST_ORDERS_WITH_REFUNDS, *TOOLS[2:], _STORE_CREDIT_TOOL),
+        make_backend=RefundCapBackend,
+        grade=grade_refund_cap,
+        reference_solution=reference_refund_cap,
+    ),
+    Task(
+        task_id="orders_h2_return_fee",
+        domain="orders",
+        instruction=(
+            "Today is 2026-10-20. The customer with email jonah.whitcombe@example.com has changed his mind "
+            "about the two wool throw blankets and the olive oil tin from one of his orders and wants to "
+            "return them; he is keeping everything else in that order. Issue the refund he is owed under "
+            "the refund policy."
+        ),
+        tools=TOOLS,
+        make_backend=ReturnFeeBackend,
+        grade=grade_return_fee,
+        reference_solution=reference_return_fee,
+    ),
+]

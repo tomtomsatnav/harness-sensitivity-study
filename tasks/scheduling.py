@@ -373,19 +373,31 @@ def _options(
     return out
 
 
-def valid_options(sc: Scenario) -> list[tuple[int, str]]:
-    """The (start minute, room_id) pairs that satisfy every constraint, from the scenario's initial state."""
-    live = [b for b in sc.bookings if b["subject"] != sc.moved_subject]
-    people = []
-    for pid in sc.attendees:
-        p = sc.people[pid]
+def _hq_windows(people: dict[str, dict[str, Any]], attendees: tuple[str, ...],
+                live: list[dict[str, Any]]) -> list[tuple[int, int, list[tuple[int, int]]]]:
+    """Each attendee's (work_start, work_end, busy intervals) in HQ-time minutes, bookings included."""
+    out = []
+    for pid in attendees:
+        p = people[pid]
         shift = (p["utc_offset_hours"] - HQ_UTC_OFFSET) * 60  # local = HQ + shift
         busy = [(_m(b["start"]) - shift, _m(b["end"]) - shift) for b in p["busy"]]
         busy += [(_from_ts(b["start"]), _from_ts(b["end"])) for b in live if pid in b["attendee_ids"]]
-        people.append((_m(p["work_start"]) - shift, _m(p["work_end"]) - shift, busy))
-    room_busy: dict[str, list[tuple[int, int]]] = {}
+        out.append((_m(p["work_start"]) - shift, _m(p["work_end"]) - shift, busy))
+    return out
+
+
+def _room_busy(live: list[dict[str, Any]]) -> dict[str, list[tuple[int, int]]]:
+    out: dict[str, list[tuple[int, int]]] = {}
     for b in live:
-        room_busy.setdefault(b["room_id"], []).append((_from_ts(b["start"]), _from_ts(b["end"])))
+        out.setdefault(b["room_id"], []).append((_from_ts(b["start"]), _from_ts(b["end"])))
+    return out
+
+
+def valid_options(sc: Scenario) -> list[tuple[int, str]]:
+    """The (start minute, room_id) pairs that satisfy every constraint, from the scenario's initial state."""
+    live = [b for b in sc.bookings if b["subject"] != sc.moved_subject]
+    people = _hq_windows(sc.people, sc.attendees, live)
+    room_busy = _room_busy(live)
     window = (_m(sc.guest_window[0]), _m(sc.guest_window[1])) if sc.guest_window else None
     return _options(
         people, [_ROOMS[r] for r in sc.rooms], room_busy,
@@ -535,9 +547,7 @@ def _reference(sc: Scenario, call: CallFn, *, use_policy: bool) -> None:
         busy = [(_from_ts(x["start"]) - shift, _from_ts(x["end"]) - shift)
                 for x in cal["busy"] if old is None or x["subject"] != old["subject"]]
         people.append((_m(cal["work_start"]) - shift, _m(cal["work_end"]) - shift, busy))
-    room_busy: dict[str, list[tuple[int, int]]] = {}
-    for b in live:
-        room_busy.setdefault(b["room_id"], []).append((_from_ts(b["start"]), _from_ts(b["end"])))
+    room_busy = _room_busy(live)
     window = (_m(sc.guest_window[0]), _m(sc.guest_window[1])) if sc.guest_window else None
     options = _options(
         people, rooms, room_busy, duration=sc.duration, headcount=len(sc.attendees) + sc.guests,
@@ -681,5 +691,255 @@ TASKS = [
         "existing booking and booking a new one with the same 90-minute length and all five people. Everyone must be "
         "free within their working hours, the room must have a whiteboard and seat all five. Use headquarters time.",
         _S05, "Q4 planning", (*_BASE_TOOLS, CANCEL_BOOKING),
+    ),
+]
+
+
+# ---------------------------------------------------------------- hard tasks
+
+# h1: two meetings back to back in one room. The second one's London attendee (working hours end at
+# 12:00 HQ) pins the whole block to the morning, Chloe's 10:00 hiring sync removes the two earlier
+# starts, and Fern is the only whiteboard room free for the 90 minutes. An agent that reads Tom's
+# hours as HQ time finds a tempting 13:00 slot in Cedar.
+@dataclass(frozen=True)
+class PairScenario(Scenario):
+    """`attendees`/`duration` describe the first meeting, `second_*` the one that follows it."""
+    second_attendees: tuple[str, ...] = ()
+    second_duration: int = 30
+    second_subject: str = ""
+
+
+_SH1 = PairScenario(
+    people={
+        "P-ANA": _person("P-ANA", [("09:00", "09:30", "Standup"), ("12:00", "13:00", "Lunch"), ("14:30", "15:30", "Roadmap review")]),
+        "P-BEN": _person("P-BEN", [("09:00", "09:30", "Standup"), ("12:30", "13:00", "1:1"), ("15:30", "16:30", "Sprint planning")]),
+        "P-CHL": _person("P-CHL", [("09:00", "09:30", "Standup"), ("10:00", "10:30", "Hiring sync"), ("12:00", "13:00", "Lunch"), ("16:00", "17:00", "Portfolio review")]),
+        "P-TOM": _person("P-TOM", [("10:00", "11:00", "Planning"), ("13:00", "13:30", "Lunch"), ("15:30", "16:00", "Standup")], 0),
+    },
+    rooms=_ALL_ROOMS,
+    bookings=(
+        _booking("BK-9801", "Candidate interview", "R-BIRCH", "11:00", "12:00", ["P-OPS"]),
+        _booking("BK-9802", "Vendor demo", "R-DUNE", "09:30", "11:00", ["P-OPS"]),
+        _booking("BK-9803", "Board prep", "R-CEDAR", "11:30", "12:30", ["P-OPS"]),
+        _booking("BK-9804", "Marketing stand-up", "R-LARK", "11:00", "11:30", ["P-NIA"]),
+        _booking("BK-9805", "Analytics sync", "R-FERN", "13:00", "14:00", ["P-KAI", "P-OWE"]),
+        _booking("BK-9806", "Supplier audit", "R-MAPLE", "10:00", "11:30", ["P-UMA"]),
+        _booking("BK-9807", "Ops sync", "R-EMBER", "10:30", "12:00", ["P-OPS"]),
+        *_FILLER,
+    ),
+    policy=None,
+    attendees=("P-ANA", "P-BEN", "P-CHL"),
+    duration=60,
+    equipment=("whiteboard",),
+    subject="Design review",
+    second_attendees=("P-ANA", "P-BEN", "P-TOM"),
+    second_duration=30,
+    second_subject="Decision sync",
+)
+
+
+def _all_free(people: list[tuple[int, int, list[tuple[int, int]]]], start: int, end: int) -> bool:
+    return all(ws <= start and end <= we and not any(_overlap(start, end, bs, be) for bs, be in busy)
+               for ws, we, busy in people)
+
+
+def _pair_options(first, second, rooms, room_busy, sc: PairScenario) -> list[tuple[int, str]]:
+    """Every (block start, room) where the first meeting then the second fit, in the same room."""
+    headcount = max(len(sc.attendees), len(sc.second_attendees))
+    total = sc.duration + sc.second_duration
+    out = []
+    for start in range(0, 24 * 60, SLOT_MINUTES):
+        mid, end = start + sc.duration, start + total
+        if end > 24 * 60 or not _all_free(first, start, mid) or not _all_free(second, mid, end):
+            continue
+        for room in rooms:
+            if room["capacity"] < headcount or not set(sc.equipment) <= set(room["equipment"]):
+                continue
+            if any(_overlap(start, end, bs, be) for bs, be in room_busy.get(room["room_id"], [])):
+                continue
+            out.append((start, room["room_id"]))
+    return out
+
+
+def valid_pair_options(sc: PairScenario) -> list[tuple[int, str]]:
+    live = list(sc.bookings)
+    return _pair_options(_hq_windows(sc.people, sc.attendees, live), _hq_windows(sc.people, sc.second_attendees, live),
+                         [_ROOMS[r] for r in sc.rooms], _room_busy(live), sc)
+
+
+def grade_pair(sc: PairScenario, backend: SchedulingBackend) -> Grade:
+    initial = {b["booking_id"] for b in sc.bookings}
+    for b in backend.bookings:
+        if b["booking_id"] in initial and b["status"] != "confirmed":
+            return Grade(success=False, detail=f"booking {b['booking_id']} is {b['status']}, expected confirmed")
+    new = [b for b in backend.bookings if b["booking_id"] not in initial and b["status"] == "confirmed"]
+    if len(new) != 2:
+        return Grade(success=False, detail=f"expected exactly 2 new bookings, found {len(new)}")
+    firsts = [b for b in new if sorted(b["attendee_ids"]) == sorted(sc.attendees)]
+    seconds = [b for b in new if sorted(b["attendee_ids"]) == sorted(sc.second_attendees)]
+    if len(firsts) != 1 or len(seconds) != 1:
+        return Grade(success=False, detail="the two bookings do not have the two expected attendee lists")
+    first, second = firsts[0], seconds[0]
+    for b, want in ((first, sc.duration), (second, sc.second_duration)):
+        if _from_ts(b["end"]) - _from_ts(b["start"]) != want:
+            return Grade(success=False, detail=f"{b['booking_id']} lasts {_from_ts(b['end']) - _from_ts(b['start'])} minutes, expected {want}")
+    if second["room_id"] != first["room_id"]:
+        return Grade(success=False, detail="the two meetings are in different rooms")
+    if second["start"] != first["end"]:
+        return Grade(success=False, detail=f"second meeting starts at {second['start']}, first ends at {first['end']}")
+    if (_from_ts(first["start"]), first["room_id"]) not in valid_pair_options(sc):
+        return Grade(success=False, detail=f"{first['room_id']} at {first['start']} breaks a constraint")
+    return Grade(success=True, detail="correct pair of bookings")
+
+
+def _calendar_windows(calendars: dict[str, dict[str, Any]], attendees: tuple[str, ...]):
+    """(work_start, work_end, busy) in HQ minutes for each attendee, from get_calendar observations."""
+    people = []
+    for pid in attendees:
+        cal = calendars[pid]
+        shift = (cal["utc_offset_hours"] - HQ_UTC_OFFSET) * 60
+        busy = [(_from_ts(x["start"]) - shift, _from_ts(x["end"]) - shift) for x in cal["busy"]]
+        people.append((_m(cal["work_start"]) - shift, _m(cal["work_end"]) - shift, busy))
+    return people
+
+
+def _reference_pair(sc: PairScenario, call: CallFn) -> None:
+    rooms = call("list_rooms")["rooms"]
+    bookings = call("list_bookings", date=DATE)["bookings"]
+    calendars = {pid: call("get_calendar", person_id=pid, date=DATE)
+                 for pid in dict.fromkeys(sc.attendees + sc.second_attendees)}
+    options = _pair_options(_calendar_windows(calendars, sc.attendees),
+                            _calendar_windows(calendars, sc.second_attendees), rooms, _room_busy(bookings), sc)
+    if len(options) != 1:
+        raise AssertionError(f"expected exactly one valid block, found {len(options)}")
+    start, room_id = options[0]
+    mid = start + sc.duration
+    call("book_meeting", subject=sc.subject, room_id=room_id, start=_ts(start), end=_ts(mid),
+         attendee_ids=list(sc.attendees))
+    call("book_meeting", subject=sc.second_subject, room_id=room_id, start=_ts(mid),
+         end=_ts(mid + sc.second_duration), attendee_ids=list(sc.second_attendees))
+
+
+# h2: cancel one booking, then book at the earliest slot that works. Cancelling the vendor demo frees
+# Ana and Ben at 10:00, which is the earliest slot once Dev's 09:30 1:1 is counted; Haven (3 seats)
+# and Atlas (8) are both free then, and the tie-break picks Haven. Working from the calendars as they
+# stood before the cancellation leads to 16:00 instead. 'Vendor demo prep' is the booking not to cancel.
+@dataclass(frozen=True)
+class CascadeScenario(Scenario):
+    cancel_subject: str = ""
+
+
+_SH2 = CascadeScenario(
+    people={
+        "P-ANA": _person("P-ANA", [("09:00", "09:30", "Standup"), ("13:00", "14:00", "Design crit")]),
+        "P-BEN": _person("P-BEN", [("09:00", "09:30", "Standup"), ("11:30", "12:30", "Vendor call"), ("15:00", "16:00", "Sprint planning")]),
+        "P-DEV": _person("P-DEV", [("09:00", "09:30", "Standup"), ("09:30", "10:00", "1:1"), ("14:00", "15:00", "Incident review")]),
+    },
+    rooms=_ALL_ROOMS,
+    bookings=(
+        _booking("BK-9701", "Vendor demo", "R-DUNE", "10:00", "11:00", ["P-ANA", "P-BEN"]),
+        _booking("BK-9702", "Vendor demo prep", "R-NOOK", "09:30", "10:00", ["P-ANA"]),
+        _booking("BK-9703", "Support huddle", "R-EMBER", "09:30", "11:30", ["P-OPS"]),
+        _booking("BK-9704", "Candidate interview", "R-BIRCH", "10:00", "12:00", ["P-OPS"]),
+        _booking("BK-9705", "Ops sync", "R-HAVEN", "11:00", "12:00", ["P-OPS"]),
+        _booking("BK-9706", "Roadmap review", "R-ATLAS", "13:00", "15:00", ["P-OPS"]),
+        *_FILLER,
+    ),
+    policy=None,
+    attendees=("P-ANA", "P-BEN", "P-DEV"),
+    duration=60,
+    equipment=("video_conference",),
+    subject="Hiring debrief",
+    cancel_subject="Vendor demo",
+)
+
+
+def _earliest_smallest(options: list[tuple[int, str]], rooms: dict[str, dict[str, Any]]) -> tuple[int, str]:
+    """The earliest start; among rooms free then, the one with the fewest seats (must be unique)."""
+    start = min(s for s, _ in options)
+    tied = sorted(((rooms[r]["capacity"], r) for s, r in options if s == start))
+    if len(tied) > 1 and tied[0][0] == tied[1][0]:
+        raise AssertionError(f"capacity tie at {_ts(start)}: {tied}")
+    return start, tied[0][1]
+
+
+def expected_cascade(sc: CascadeScenario) -> tuple[int, str]:
+    live = [b for b in sc.bookings if b["subject"] != sc.cancel_subject]
+    options = _options(_hq_windows(sc.people, sc.attendees, live), [_ROOMS[r] for r in sc.rooms], _room_busy(live),
+                       duration=sc.duration, headcount=len(sc.attendees), equipment=sc.equipment,
+                       guests=0, guest_window=None, policy={})
+    return _earliest_smallest(options, _ROOMS)
+
+
+def grade_cascade(sc: CascadeScenario, backend: SchedulingBackend) -> Grade:
+    initial = {b["booking_id"]: b for b in sc.bookings}
+    for b in backend.bookings:
+        if b["booking_id"] in initial:
+            want = "cancelled" if b["subject"] == sc.cancel_subject else "confirmed"
+            if b["status"] != want:
+                return Grade(success=False, detail=f"booking {b['booking_id']} is {b['status']}, expected {want}")
+    new = [b for b in backend.bookings if b["booking_id"] not in initial and b["status"] == "confirmed"]
+    if len(new) != 1:
+        return Grade(success=False, detail=f"expected exactly 1 new booking, found {len(new)}")
+    b = new[0]
+    if sorted(b["attendee_ids"]) != sorted(sc.attendees):
+        return Grade(success=False, detail=f"attendees {sorted(b['attendee_ids'])}, expected {sorted(sc.attendees)}")
+    start, end = _from_ts(b["start"]), _from_ts(b["end"])
+    if end - start != sc.duration:
+        return Grade(success=False, detail=f"meeting lasts {end - start} minutes, expected {sc.duration}")
+    want = expected_cascade(sc)
+    if (start, b["room_id"]) != want:
+        return Grade(success=False, detail=f"booked {b['room_id']} at {b['start']}, expected {want[1]} at {_ts(want[0])}")
+    return Grade(success=True, detail="correct cancellation and booking")
+
+
+def _reference_cascade(sc: CascadeScenario, call: CallFn) -> None:
+    rooms = call("list_rooms")["rooms"]
+    bookings = call("list_bookings", date=DATE)["bookings"]
+    old = next(b for b in bookings if b["subject"] == sc.cancel_subject)
+    call("cancel_booking", booking_id=old["booking_id"])
+    live = [b for b in bookings if b is not old]
+    # Calendars are read after the cancellation, so the freed slot shows in them.
+    calendars = {pid: call("get_calendar", person_id=pid, date=DATE) for pid in sc.attendees}
+    people = _calendar_windows(calendars, sc.attendees)
+    options = _options(people, rooms, _room_busy(live), duration=sc.duration, headcount=len(sc.attendees),
+                       equipment=sc.equipment, guests=0, guest_window=None, policy={})
+    start, room_id = _earliest_smallest(options, {r["room_id"]: r for r in rooms})
+    call("book_meeting", subject=sc.subject, room_id=room_id, start=_ts(start), end=_ts(start + sc.duration),
+         attendee_ids=list(sc.attendees))
+
+
+HARD_TASKS = [
+    Task(
+        task_id="scheduling_h1_back_to_back",
+        domain="scheduling",
+        instruction=(
+            "Today is 2026-11-02. Book two meetings on 2026-11-03 in the same room, one straight after the other. "
+            "First a 60-minute 'Design review' for Ana Ruiz (P-ANA), Ben Okafor (P-BEN) and Chloe Marsh (P-CHL), "
+            "then, starting exactly when it ends, a 30-minute 'Decision sync' for Ana Ruiz (P-ANA), Ben Okafor "
+            "(P-BEN) and Tom Hale (P-TOM, London). Meeting times are in headquarters time, which is New York "
+            "(UTC-5). Each person must be free and inside their own local working hours for the meeting they "
+            "attend, and the room must have a whiteboard and seat three. Meetings start on the hour or half hour."
+        ),
+        tools=_BASE_TOOLS,
+        make_backend=partial(SchedulingBackend, _SH1),
+        grade=partial(grade_pair, _SH1),
+        reference_solution=partial(_reference_pair, _SH1),
+    ),
+    Task(
+        task_id="scheduling_h2_cancel_then_earliest",
+        domain="scheduling",
+        instruction=(
+            "Today is 2026-11-02. The 'Vendor demo' booked in Dune on 2026-11-03 has been called off: cancel it. "
+            "Then book a 60-minute 'Hiring debrief' on 2026-11-03 for Ana Ruiz (P-ANA), Ben Okafor (P-BEN) and "
+            "Dev Patel (P-DEV), all based at headquarters, at the earliest start time at which all three are free "
+            "within their working hours and a room with video conferencing that seats three is available. If "
+            "more than one such room is free at that time, use the one with the fewest seats. Use headquarters "
+            "time. Meetings start on the hour or half hour."
+        ),
+        tools=(*_BASE_TOOLS, CANCEL_BOOKING),
+        make_backend=partial(SchedulingBackend, _SH2),
+        grade=partial(grade_cascade, _SH2),
+        reference_solution=partial(_reference_cascade, _SH2),
     ),
 ]

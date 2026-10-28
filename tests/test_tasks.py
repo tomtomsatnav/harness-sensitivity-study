@@ -4,20 +4,21 @@ import pytest
 
 from perturb import CONDITIONS
 from runner.env import Environment, run_reference
-from tasks import ALL_TASKS, TASKS_BY_ID
+from tasks import ALL_TASKS, HARD_TASKS, TASKS_BY_ID
 
 BASE = CONDITIONS["baseline"]
-TASK_IDS = [t.task_id for t in ALL_TASKS]
+EVERY_TASK = [*ALL_TASKS, *HARD_TASKS]
+TASK_IDS = [t.task_id for t in EVERY_TASK]
 
 
-@pytest.mark.parametrize("task", ALL_TASKS, ids=TASK_IDS)
+@pytest.mark.parametrize("task", EVERY_TASK, ids=TASK_IDS)
 def test_task_rules(task):
     assert 3 <= len(task.tools) <= 6
     _, log = run_reference(task, BASE)
     assert 3 <= len(log) <= 10, f"reference solution takes {len(log)} steps"
 
 
-@pytest.mark.parametrize("task", ALL_TASKS, ids=TASK_IDS)
+@pytest.mark.parametrize("task", EVERY_TASK, ids=TASK_IDS)
 def test_backend_is_deterministic(task):
     a, b = task.make_backend(), task.make_backend()
     assert a.snapshot() == b.snapshot()
@@ -26,9 +27,18 @@ def test_backend_is_deterministic(task):
     assert log_a == log_b
 
 
-@pytest.mark.parametrize("task", ALL_TASKS, ids=TASK_IDS)
+@pytest.mark.parametrize("task", EVERY_TASK, ids=TASK_IDS)
 def test_doing_nothing_fails(task):
     assert not Environment(task, BASE).grade().success
+
+
+def test_registries():
+    assert len(ALL_TASKS) == 25 and len(HARD_TASKS) == 10
+    assert len({t.task_id for t in EVERY_TASK}) == 35
+    for domain in ("orders", "inventory", "records", "scheduling", "support"):
+        ids = [t.task_id for t in HARD_TASKS if t.domain == domain]
+        assert [i.split("_")[1] for i in ids] == ["h1", "h2"] and all(i.startswith(f"{domain}_h") for i in ids)
+    assert all(TASKS_BY_ID[t.task_id] is t for t in EVERY_TASK)
 
 
 def _env_after(task_id, calls):
@@ -519,7 +529,7 @@ def test_records_duplicate_pair_is_unique():
         target = backend._record(sc["survivor"])
         twins = sorted(r["record_id"] for r in backend.records if r["status"] == "active"
                        and (r["name"], r["date_of_birth"]) == (target["name"], target["date_of_birth"]))
-        assert twins == sorted([sc["survivor"], sc["loser"]]), key
+        assert twins == sorted([sc["survivor"], *records._losers(sc)]), key
         ids = [r["record_id"] for r in backend.records]
         assert len(ids) == len(set(ids)), key
 

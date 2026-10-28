@@ -23,7 +23,7 @@ from pydantic import ValidationError
 from perturb import CONDITIONS, STUDY_CONDITIONS
 from runner.agent import MAX_TURNS, run_episode
 from runner.schemas import EpisodeResult
-from tasks import ALL_TASKS, TASKS_BY_ID
+from tasks import ALL_TASKS, HARD_TASKS, TASKS_BY_ID
 
 MODELS = {
     "haiku": "claude-haiku-5-5",
@@ -57,7 +57,7 @@ def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--pilot", action="store_true", help="2 tasks x study conditions x 2 runs on all models")
     p.add_argument("--models", nargs="+", choices=list(MODELS), default=["haiku"])
-    p.add_argument("--tasks", nargs="+", default=["all"], help="task IDs, or 'all'")
+    p.add_argument("--tasks", nargs="+", default=["all"], help="task IDs, 'all' (the 25 study tasks) or 'hard'")
     p.add_argument("--conditions", nargs="+", default=["study"], help="condition names, 'study' or 'all'")
     p.add_argument("--runs", type=int, default=10)
     p.add_argument("--effort", choices=["low", "medium", "high", "xhigh", "max"], default=None,
@@ -72,7 +72,12 @@ def main(argv: list[str] | None = None) -> int:
         args.models, args.runs, args.out = PILOT["models"], PILOT["runs"], PILOT["out"]
         tasks = [TASKS_BY_ID[t] for t in PILOT["tasks"]]
     else:
-        tasks = ALL_TASKS if args.tasks == ["all"] else [TASKS_BY_ID[t] for t in args.tasks]
+        if args.tasks == ["all"]:
+            tasks = ALL_TASKS
+        elif args.tasks == ["hard"]:
+            tasks = HARD_TASKS
+        else:
+            tasks = [TASKS_BY_ID[t] for t in args.tasks]
 
     if args.conditions == ["study"]:
         conditions = [CONDITIONS[c] for c in STUDY_CONDITIONS]

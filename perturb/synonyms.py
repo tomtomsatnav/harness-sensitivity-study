@@ -198,6 +198,18 @@ SYNONYMS: dict[str, str] = {
     "seat_count": "licensed_seats",
     "customer_since": "client_since",
     "updated_by": "last_editor",
+
+    # hard tasks
+    "refunds": "repayments",
+    "cash_refund_cap": "cash_cap_limit",
+    "cap_window_days": "cap_period_days",
+    "restocking_fee_percent": "restock_charge_percent",
+    "fee_waiver_days": "charge_free_days",
+    "lanes": "shipping_links",
+    "transit_days": "days_in_transit",
+    "capacities": "queue_limits",
+    "max_open": "open_ceiling",
+    "overflow_queue": "spillover_desk",
 }
 
 # Keys deliberately left unchanged in every condition.
