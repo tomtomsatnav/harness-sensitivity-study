@@ -86,6 +86,137 @@ def test_invalid_input_is_counted():
     assert env.backend.transfers == []
 
 
+# --- new orders and inventory tasks ----------------------------------------------------------------
+
+def _refund(oid, amount, reason):
+    return ("issue_refund", {"order_id": oid, "amount": amount, "reason": reason})
+
+
+def _credit(cid, oid, amount):
+    return ("issue_store_credit", {"customer_id": cid, "order_id": oid, "amount": amount})
+
+
+def _xfer(sku, src, dst, qty):
+    return ("transfer_stock", {"sku": sku, "from_warehouse_id": src, "to_warehouse_id": dst, "quantity": qty})
+
+
+@pytest.mark.parametrize("calls, why", [
+    ([_refund("ORD-70162", 85.0, "not_received")], "refunded without shipping"),
+    ([_refund("ORD-70115", 52.5, "not_received")], "refunded a delivered order"),
+    ([_refund("ORD-70162", 91.25, "other")], "wrong reason"),
+    ([_refund("ORD-70162", 91.25, "not_received")] * 2, "refunded twice"),
+    ([_refund("ORD-70162", 91.25, "not_received"), _refund("ORD-70115", 52.5, "not_received")], "extra refund"),
+])
+def test_orders_02_grader_rejects(calls, why):
+    assert not _env_after("orders_02_lost_in_transit", calls).grade().success, why
+
+
+def test_orders_02_refuses_still_shipped():
+    env = Environment(TASKS_BY_ID["orders_02_lost_in_transit"], BASE)
+    _, is_error = env.call("issue_refund", {"order_id": "ORD-70240", "amount": 24.0, "reason": "not_received"})
+    assert is_error and env.tool_errors == 1
+
+
+@pytest.mark.parametrize("calls, why", [
+    ([_refund("ORD-71004", 36.0, "damaged")], "cash refund outside the window"),
+    ([_credit("C-2310", "ORD-71004", 36.0)], "credit on the carafe line only"),
+    ([_credit("C-2310", "ORD-71004", 36.5)], "credit counted shipping"),
+    ([_credit("C-2310", "ORD-71190", 8.75)], "credit on the newer order"),
+    ([_credit("C-2310", "ORD-71004", 34.0), _credit("C-2310", "ORD-71004", 34.0)], "credited twice"),
+    ([_credit("C-2310", "ORD-71004", 34.0), _refund("ORD-71004", 34.0, "damaged")], "credit plus refund"),
+])
+def test_orders_03_grader_rejects(calls, why):
+    assert not _env_after("orders_03_outside_window_credit", calls).grade().success, why
+
+
+@pytest.mark.parametrize("calls, why", [
+    ([_refund("ORD-72144", 76.0, "wrong_item")], "gold shipping not refunded"),
+    ([_refund("ORD-72144", 106.75, "wrong_item")], "refunded the whole order"),
+    ([_refund("ORD-72031", 44.5, "wrong_item")], "older order outside the window"),
+    ([_refund("ORD-72144", 38.0 + 8.75, "wrong_item")], "only one board refunded"),
+    ([_refund("ORD-72144", 84.75, "damaged")], "wrong reason"),
+])
+def test_orders_04_grader_rejects(calls, why):
+    assert not _env_after("orders_04_wrong_item_line", calls).grade().success, why
+
+
+@pytest.mark.parametrize("calls, why", [
+    ([_refund("ORD-73010", 84.0, "damaged")], "silver Priya Nair's order"),
+    ([_refund("ORD-73077", 84.5, "damaged")], "Priya Nayar's order"),
+    ([_refund("ORD-73055", 103.0, "damaged")], "gold shipping left out"),
+    ([_refund("ORD-73055", 84.5, "damaged")], "refunded only the duvet line"),
+    ([_refund("ORD-73055", 108.5, "damaged"), _refund("ORD-73010", 84.0, "damaged")], "extra refund to wrong Priya"),
+])
+def test_orders_05_grader_rejects(calls, why):
+    assert not _env_after("orders_05_similar_names", calls).grade().success, why
+
+
+@pytest.mark.parametrize("task_id, calls", [
+    ("orders_02_lost_in_transit", [_refund("ORD-70162", 91.25, "not_received")]),
+    ("orders_03_outside_window_credit", [_credit("C-2310", "ORD-71004", 34.0)]),
+    ("orders_04_wrong_item_line", [_refund("ORD-72144", 84.75, "wrong_item")]),
+    ("orders_05_similar_names", [_refund("ORD-73055", 108.5, "damaged")]),
+    ("inventory_02_split_sources", [_xfer("WID-204", "DAL", "BOS", 40), _xfer("WID-204", "PHX", "BOS", 5)]),
+    ("inventory_03_three_skus", [_xfer("WID-204", "DAL", "BOS", 18), _xfer("WID-310", "CHI", "BOS", 26)]),
+    ("inventory_04_rebalance_two_sites", [_xfer("WID-410", "DAL", "BOS", 15), _xfer("WID-410", "DAL", "SEA", 30)]),
+    ("inventory_05_warehouse_closure", [_xfer("WID-204", "PHX", "DAL", 25), _xfer("GAD-550", "PHX", "DAL", 36)]),
+])
+def test_new_tasks_correct_end_state_passes(task_id, calls):
+    assert _env_after(task_id, calls).grade().success
+
+
+@pytest.mark.parametrize("calls, why", [
+    ([_xfer("WID-204", "DAL", "BOS", 45)], "DAL pushed below safety stock"),
+    ([_xfer("WID-204", "CHI", "BOS", 15), _xfer("WID-204", "DAL", "BOS", 30)], "CHI first because it has most on hand"),
+    ([_xfer("WID-204", "DAL", "BOS", 25), _xfer("WID-204", "PHX", "BOS", 20)], "even-ish split, not largest surplus first"),
+    ([_xfer("WID-204", "DAL", "BOS", 40)], "shortfall of 5 left"),
+    ([_xfer("WID-204", "DAL", "BOS", 40), _xfer("WID-204", "SEA", "BOS", 5)], "SEA below safety stock"),
+])
+def test_inventory_02_grader_rejects(calls, why):
+    assert not _env_after("inventory_02_split_sources", calls).grade().success, why
+
+
+@pytest.mark.parametrize("calls, why", [
+    ([_xfer("WID-204", "DAL", "BOS", 18)], "WID-310 never moved"),
+    ([_xfer("WID-204", "DAL", "BOS", 18), _xfer("WID-310", "DAL", "BOS", 26)], "DAL cannot cover WID-310 above safety"),
+    ([_xfer("WID-204", "PHX", "BOS", 18), _xfer("WID-310", "CHI", "BOS", 26)], "PHX below safety stock"),
+    ([_xfer("WID-204", "DAL", "BOS", 18), _xfer("WID-310", "CHI", "BOS", 26), _xfer("GAD-550", "DAL", "BOS", 5)],
+     "moved GAD-550 that already had enough"),
+    ([_xfer("WID-204", "DAL", "BOS", 18), _xfer("WID-310", "CHI", "BOS", 30)], "overshot WID-310"),
+])
+def test_inventory_03_grader_rejects(calls, why):
+    assert not _env_after("inventory_03_three_skus", calls).grade().success, why
+
+
+@pytest.mark.parametrize("calls, why", [
+    ([_xfer("WID-410", "DAL", "BOS", 15)], "SEA never topped up"),
+    ([_xfer("WID-410", "CHI", "SEA", 30), _xfer("WID-410", "DAL", "BOS", 15)], "two donors"),
+    ([_xfer("WID-410", "CHI", "BOS", 15), _xfer("WID-410", "CHI", "SEA", 30)], "CHI below safety stock"),
+    ([_xfer("WID-410", "DAL", "BOS", 15), _xfer("WID-410", "DAL", "SEA", 35)], "SEA overshot"),
+    ([_xfer("WID-410", "DAL", "SEA", 45)], "all to SEA"),
+])
+def test_inventory_04_grader_rejects(calls, why):
+    assert not _env_after("inventory_04_rebalance_two_sites", calls).grade().success, why
+
+
+@pytest.mark.parametrize("calls, why", [
+    ([_xfer("WID-204", "PHX", "DAL", 25)], "GAD-550 left behind"),
+    ([_xfer("WID-204", "PHX", "DAL", 25), _xfer("GAD-550", "PHX", "DAL", 36), _xfer("WID-204", "BOS", "DAL", 5)],
+     "touched another warehouse"),
+    ([_xfer("WID-204", "PHX", "BOS", 25), _xfer("GAD-550", "PHX", "DAL", 36)], "sent WID-204 to BOS"),
+    ([_xfer("WID-204", "PHX", "DAL", 20), _xfer("GAD-550", "PHX", "DAL", 36)], "WID-204 left 5 unreserved units"),
+])
+def test_inventory_05_grader_rejects(calls, why):
+    assert not _env_after("inventory_05_warehouse_closure", calls).grade().success, why
+
+
+def test_inventory_05_cannot_move_reserved_units():
+    env = Environment(TASKS_BY_ID["inventory_05_warehouse_closure"], BASE)
+    _, is_error = env.call("transfer_stock", {"sku": "WID-310", "from_warehouse_id": "PHX",
+                                              "to_warehouse_id": "DAL", "quantity": 25})
+    assert is_error and env.tool_errors == 1
+
+
 # --- records ---------------------------------------------------------------------------------------
 
 def _upd(rid, field, value):
