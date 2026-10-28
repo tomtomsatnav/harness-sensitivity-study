@@ -400,3 +400,21 @@ def test_stats_against_r0_baseline(tmp_path):
     [d] = stats.all_deltas(results, n_boot=100)
     assert d.condition == "R1_reversed_fields" and d.baseline_rate == 1.0 and d.condition_rate == 0.5 and d.delta == -0.5
     assert stats.main([str(path), "--out", str(tmp_path / "d.csv")]) == 0
+
+
+@pytest.mark.parametrize("cond", list(CONDITIONS))
+def test_constrained_mode_sends_code_enum_and_parses_json(cond):
+    inst = INSTANCES_BY_ID["ascending_00"]
+    inner = solver_client(ASCENDING)
+    client = FakeClient(lambda text: json.dumps({"code": inner.reply(text)}))
+    r = run_episode(client, "claude-haiku-5-5", inst, CONDITIONS[cond], 0, constrained=True)
+    assert r.status == "completed" and r.success and r.invalid_replies == 0
+    for req in client.requests:
+        enum = req["output_config"]["format"]["schema"]["properties"]["code"]["enum"]
+        assert sorted(enum) == sorted(menu_pairs(req["messages"][-1]["content"]))
+
+
+def test_constrained_mode_rejects_non_json_reply():
+    inst = INSTANCES_BY_ID["checkboxes_01"]
+    r = run_episode(FakeClient(lambda text: "A"), "claude-haiku-5-5", inst, CONDITIONS["R0_canonical"], 0, constrained=True)
+    assert r.invalid_replies == r.turns and not r.success

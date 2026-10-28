@@ -38,6 +38,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--runs", type=int, default=3)
     p.add_argument("--concurrency", type=int, default=8)
     p.add_argument("--out", default="results/readout.jsonl")
+    p.add_argument("--constrained", action="store_true", help="restrict replies to the legal codes via structured outputs")
     p.add_argument("--dry-run", action="store_true", help="print the plan and exit")
     args = p.parse_args(argv)
 
@@ -75,7 +76,7 @@ def main(argv: list[str] | None = None) -> int:
     lock = threading.Lock()
     finished = 0
     with ThreadPoolExecutor(max_workers=args.concurrency) as pool, out.open("a") as f:
-        futures = [pool.submit(run_episode, clients[model], model, inst, cond, run) for model, inst, cond, run in plan]
+        futures = [pool.submit(run_episode, clients[model], model, inst, cond, run, constrained=args.constrained) for model, inst, cond, run in plan]
         try:
             for fut in as_completed(futures):
                 result = fut.result()

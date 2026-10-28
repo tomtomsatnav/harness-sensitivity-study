@@ -47,7 +47,9 @@ class OllamaClient:
         self.timeout = timeout
         self.messages = self  # so client.messages.create(...) works
 
-    def create(self, *, model: str, system: str, messages: list[dict[str, Any]], **_: Any) -> OllamaResponse:
+    def create(
+        self, *, model: str, system: str, messages: list[dict[str, Any]], output_config: dict[str, Any] | None = None, **_: Any
+    ) -> OllamaResponse:
         body = {
             "model": model,
             "messages": [{"role": "system", "content": system}, *messages],
@@ -55,6 +57,10 @@ class OllamaClient:
             "stream": False,
             "options": OPTIONS,
         }
+        if output_config:
+            # Ollama's structured outputs: the reply is constrained to the JSON schema.
+            body["format"] = output_config["format"]["schema"]
+            body["options"] = {**OPTIONS, "num_predict": 20}
         req = urllib.request.Request(self.url, data=json.dumps(body).encode(), headers={"Content-Type": "application/json"})
         try:
             with urllib.request.urlopen(req, timeout=self.timeout) as resp:

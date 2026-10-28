@@ -8,6 +8,7 @@ executed. The full multi-turn history is kept, like a normal chat.
 
 from __future__ import annotations
 
+import json
 import time
 from datetime import datetime, timezone
 from typing import Any
@@ -20,6 +21,27 @@ from readout.tasks import ASCENDING, CHECKBOXES, CHECKBOXES_SOFT, MAX_DECISIONS,
 from runner.schemas import EpisodeResult, Usage
 
 MAX_TOKENS = 5
+# With --constrained, each reply must be JSON {"code": <one of the listed codes>}, enforced by
+# structured outputs. This stands in for the paper's readout, which normalises the next-token
+# logits over the legal menu codes, so the model cannot produce an invalid action.
+CONSTRAINED_MAX_TOKENS = 20
+
+
+def code_schema(codes: list[str]) -> dict[str, Any]:
+    return {
+        "type": "object",
+        "properties": {"code": {"type": "string", "enum": codes}},
+        "required": ["code"],
+        "additionalProperties": False,
+    }
+
+
+def parse_json_code(reply: str) -> str | None:
+    try:
+        code = json.loads(reply).get("code")
+    except (ValueError, AttributeError):
+        return None
+    return code if isinstance(code, str) else None
 
 HARNESS_RULES = (
     "You are controlling a web page through a harness. Each turn you receive one observation as a "
@@ -96,6 +118,7 @@ def run_episode(
     run_idx: int,
     *,
     max_decisions: int = MAX_DECISIONS,
+    constrained: bool = False,
 ) -> ReadoutResult:
     sim = make_sim(inst)
     messages: list[dict[str, Any]] = []
@@ -110,7 +133,7 @@ def run_episode(
 
     request: dict[str, Any] = {
         "model": model,
-        "max_tokens": MAX_TOKENS,
+        "max_tokens": CONSTRAINED_MAX_TOKENS if constrained else MAX_TOKENS,
         "system": system_prompt(inst.family),
         # Automatic caching, as in runner/agent.py: the system prompt and earlier turns are
         # read from cache when the prefix is long enough to be cacheable.
@@ -124,6 +147,8 @@ def run_episode(
             actions = sim.actions()
             text, decoder = condition.render(observation(sim, max_decisions - turns), actions)
             messages.append({"role": "user", "content": text})
+            if constrained:
+                request["output_config"] = {"format": {"type": "json_schema", "schema": code_schema(sorted(decoder))}}
             response = client.messages.create(messages=messages, **request)
             turns += 1
             _add_usage(usage, response.usage)
@@ -135,7 +160,7 @@ def run_episode(
             # The API rejects an empty assistant message, so an empty reply is kept in the
             # history as a placeholder; it is still an invalid action.
             messages.append({"role": "assistant", "content": reply if reply.strip() else "(empty reply)"})
-            code = parse_code(reply)
+            code = parse_json_code(reply) if constrained else parse_code(reply)
             codes.append(code)
             if code in decoder:
                 sim.step(actions[decoder[code]])
