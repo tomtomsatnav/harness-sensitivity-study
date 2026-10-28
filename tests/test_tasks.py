@@ -481,3 +481,11 @@ def test_support_cannot_close_before_parent():
     env = Environment(TASKS_BY_ID["support_05_close_in_order"], BASE)
     _, is_error = env.call("close_ticket", {"ticket_id": "T-6101", "resolution": "resolved"})
     assert is_error
+
+
+def test_scheduling_rejects_off_grid_start():
+    # 10:15 in Cedar meets every stated rule except the half-hour grid the grader assumes.
+    env = Environment(TASKS_BY_ID["scheduling_03_workshop_room_buffer"], BASE)
+    name, args = _book("R-CEDAR", "10:15", "11:45", _FOUR)
+    _, is_error = env.call(name, args)
+    assert is_error and env.tool_errors == 1
