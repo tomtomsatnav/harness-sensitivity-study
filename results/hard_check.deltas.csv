@@ -1,0 +1,2 @@
+model,condition,n_tasks,baseline_rate,condition_rate,delta,ci_low,ci_high
+claude-haiku-5-5,stacked,10,1.0,0.9666666666666666,-0.03333333333333334,-0.1,0.0
