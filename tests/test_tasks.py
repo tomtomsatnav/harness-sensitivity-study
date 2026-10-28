@@ -84,3 +84,97 @@ def test_invalid_input_is_counted():
     assert e1 and e2 and e3
     assert env.invalid_tool_calls == 3
     assert env.backend.transfers == []
+
+
+# ---- scheduling
+
+D = "2026-11-03T"
+
+
+def _book(room, start, end, people, subject="x"):
+    return ("book_meeting", {"subject": subject, "room_id": room, "start": D + start, "end": D + end,
+                             "attendee_ids": people})
+
+
+_FIVE = ["P-ANA", "P-BEN", "P-CHL", "P-DEV", "P-ELI"]
+_FOUR = ["P-ANA", "P-BEN", "P-CHL", "P-DEV"]
+_THREE = ["P-PRI", "P-TOM", "P-SVE"]
+_SCHEDULING_IDS = [t.task_id for t in ALL_TASKS if t.domain == "scheduling"]
+
+
+def test_scheduling_has_five_tasks_with_unique_answers():
+    from tasks import scheduling
+    assert len(_SCHEDULING_IDS) == 5
+    for sc in (scheduling._S01, scheduling._S02, scheduling._S03, scheduling._S04, scheduling._S05):
+        assert len(scheduling.valid_options(sc)) == 1
+
+
+@pytest.mark.parametrize("task_id, calls", [
+    ("scheduling_01_vc_room_for_five", [_book("R-EMBER", "13:30", "14:30", _FIVE)]),
+    ("scheduling_02_three_time_zones", [_book("R-EMBER", "10:00", "11:00", _THREE)]),
+    ("scheduling_03_workshop_room_buffer", [_book("R-CEDAR", "10:30", "12:00", _FOUR)]),
+    ("scheduling_04_client_demo_policy", [_book("R-EMBER", "13:30", "14:30", ["P-ANA", "P-BEN"])]),
+    ("scheduling_05_reschedule_planning", [("cancel_booking", {"booking_id": "BK-7731"}),
+                                           _book("R-DUNE", "15:00", "16:30", _FIVE)]),
+])
+def test_scheduling_correct_end_state_passes(task_id, calls):
+    assert _env_after(task_id, calls).grade().success
+
+
+@pytest.mark.parametrize("calls, why", [
+    ([_book("R-CEDAR", "09:30", "10:30", _FIVE)], "earliest common slot in a big room without video conferencing"),
+    ([_book("R-BIRCH", "09:30", "10:30", _FIVE)], "video-conference room that seats only four"),
+    ([_book("R-DUNE", "13:30", "14:30", _FIVE)], "right time, room without video conferencing"),
+    ([_book("R-EMBER", "13:30", "14:30", _FIVE[:4])], "Eli left out"),
+    ([_book("R-EMBER", "13:30", "14:30", _FIVE), _book("R-CEDAR", "09:30", "10:30", _FIVE)], "two bookings"),
+])
+def test_scheduling_01_grader_rejects(calls, why):
+    assert not _env_after("scheduling_01_vc_room_for_five", calls).grade().success, why
+
+
+@pytest.mark.parametrize("calls, why", [
+    ([_book("R-ATLAS", "16:00", "17:00", _THREE)], "all free on the clock but outside London and Berlin working hours"),
+    ([_book("R-CEDAR", "10:00", "11:00", _THREE)], "right time, room without video conferencing"),
+    ([_book("R-EMBER", "10:00", "11:00", _THREE[:2])], "Sven left out"),
+    ([_book("R-EMBER", "10:00", "10:45", _THREE)], "wrong length"),
+])
+def test_scheduling_02_grader_rejects(calls, why):
+    assert not _env_after("scheduling_02_three_time_zones", calls).grade().success, why
+
+
+@pytest.mark.parametrize("calls, why", [
+    ([_book("R-CEDAR", "10:00", "11:30", _FOUR)], "back to back with the 09:00-10:00 Cedar booking"),
+    ([_book("R-BIRCH", "10:30", "12:00", _FOUR)], "ends back to back with the 12:00 Birch booking"),
+    ([_book("R-EMBER", "10:30", "12:00", _FOUR)], "no whiteboard"),
+    ([_book("R-CEDAR", "10:30", "12:00", _FOUR[:3])], "Dev left out"),
+])
+def test_scheduling_03_grader_rejects(calls, why):
+    assert not _env_after("scheduling_03_workshop_room_buffer", calls).grade().success, why
+
+
+@pytest.mark.parametrize("calls, why", [
+    ([_book("R-ATLAS", "10:00", "11:00", ["P-ANA", "P-BEN"])], "earliest slot but not on the ground floor"),
+    ([_book("R-EMBER", "12:00", "13:00", ["P-ANA", "P-BEN"])], "inside the midday blackout"),
+    ([_book("R-NOOK", "10:00", "11:00", ["P-ANA", "P-BEN"])], "ground floor but seats two"),
+])
+def test_scheduling_04_grader_rejects(calls, why):
+    assert not _env_after("scheduling_04_client_demo_policy", calls).grade().success, why
+
+
+@pytest.mark.parametrize("calls, why", [
+    ([_book("R-DUNE", "15:00", "16:30", _FIVE)], "booked the new slot but never cancelled the old booking"),
+    ([("cancel_booking", {"booking_id": "BK-7731"})], "cancelled without rebooking"),
+    ([("cancel_booking", {"booking_id": "BK-7731"}), _book("R-ATLAS", "15:00", "16:30", _FIVE)], "no whiteboard"),
+    ([("cancel_booking", {"booking_id": "BK-7731"}), _book("R-BIRCH", "15:00", "16:30", _FIVE)], "room seats four"),
+    ([("cancel_booking", {"booking_id": "BK-7731"}), _book("R-BIRCH", "10:00", "11:30", _FOUR)], "Eli left out, same slot"),
+    ([("cancel_booking", {"booking_id": "BK-9501"}), _book("R-DUNE", "15:00", "16:30", _FIVE)], "cancelled the wrong booking"),
+])
+def test_scheduling_05_grader_rejects(calls, why):
+    assert not _env_after("scheduling_05_reschedule_planning", calls).grade().success, why
+
+
+def test_scheduling_refuses_double_booking():
+    env = Environment(TASKS_BY_ID["scheduling_01_vc_room_for_five"], BASE)
+    name, args = _book("R-ATLAS", "09:30", "10:30", _FIVE)
+    _, is_error = env.call(name, args)
+    assert is_error and env.tool_errors == 1
