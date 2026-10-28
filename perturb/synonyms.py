@@ -29,6 +29,26 @@ SYNONYMS: dict[str, str] = {
     "refund_id": "refund_ref",
     "amount": "amt",
     "reason": "cause",
+    # records
+    "record_id": "rec_ref",
+    "query": "search_text",
+    "matches": "hits",
+    "created_at": "opened_on",
+    "updated_at": "edited_on",
+    "last_active_at": "last_seen_on",
+    "date_of_birth": "birth_date",
+    "subscription_status": "plan_state",
+    "merged_into": "survivor_ref",
+    "fields": "attributes",
+    "field": "attribute_name",
+    "value": "content",
+    "verified_at": "confirmed_on",
+    "source": "origin",
+    "sources": "origins",
+    "source_precedence": "origin_ranking",
+    "changes": "edits",
+    "changed_at": "edited_at",
+    "changed_by": "edited_by",
     # inventory
     "warehouses": "sites",
     "warehouse_id": "site_ref",
@@ -39,10 +59,6 @@ SYNONYMS: dict[str, str] = {
     "transfer_id": "move_ref",
     "from_warehouse_id": "source_site",
     "to_warehouse_id": "dest_site",
-
-    # records
-
-
 
     # scheduling
 
